@@ -8,6 +8,9 @@ import {
   buildPlainText,
   buildTimestampedText,
   buildSrt,
+  formatChapterTimestamp,
+  normalizeChapters,
+  buildChaptersText,
   type Segment,
 } from '../scripts/transcript-utils'
 
@@ -272,5 +275,88 @@ describe('buildSrt', () => {
     expect(buildSrt(segs)).toBe(
       '1\n00:00:01,000 --> 00:00:01,001\na\n\n' + '2\n00:00:01,000 --> 00:00:03,000\nb',
     )
+  })
+})
+
+describe('formatChapterTimestamp', () => {
+  it('formata zero como 0:00 (sem colchetes)', () => {
+    expect(formatChapterTimestamp(0)).toBe('0:00')
+  })
+
+  it('formata minutos sem padding no grupo inicial', () => {
+    expect(formatChapterTimestamp(154000)).toBe('2:34')
+  })
+
+  it('inclui hora quando passa de 1h', () => {
+    expect(formatChapterTimestamp(3723000)).toBe('1:02:03')
+  })
+
+  it('trunca milissegundos para o segundo cheio', () => {
+    expect(formatChapterTimestamp(2999)).toBe('0:02')
+  })
+})
+
+describe('normalizeChapters', () => {
+  const segs: Segment[] = [
+    { text: 'a', offset: 80, duration: 2000 },
+    { text: 'b', offset: 30000, duration: 2000 },
+    { text: 'c', offset: 65000, duration: 2000 },
+  ]
+
+  it('ancora cada startSeconds ao offset de segmento mais próximo', () => {
+    const raw = [
+      { startSeconds: 0, title: 'Intro' },
+      { startSeconds: 31, title: 'Meio' }, // 31000ms → mais próximo de 30000
+      { startSeconds: 64, title: 'Fim' }, // 64000ms → mais próximo de 65000
+    ]
+    expect(normalizeChapters(raw, segs)).toEqual([
+      { offsetMs: 0, title: 'Intro' },
+      { offsetMs: 30000, title: 'Meio' },
+      { offsetMs: 65000, title: 'Fim' },
+    ])
+  })
+
+  it('força o primeiro capítulo a 0 mesmo se a IA não começar do início', () => {
+    const raw = [{ startSeconds: 30, title: 'Meio' }]
+    expect(normalizeChapters(raw, segs)).toEqual([{ offsetMs: 0, title: 'Meio' }])
+  })
+
+  it('ordena por tempo e remove offsets duplicados (mantém o primeiro)', () => {
+    const raw = [
+      { startSeconds: 65, title: 'Fim' },
+      { startSeconds: 30, title: 'Meio' },
+      { startSeconds: 31, title: 'Duplicado de Meio' }, // ancora no mesmo 30000
+    ]
+    expect(normalizeChapters(raw, segs)).toEqual([
+      { offsetMs: 0, title: 'Meio' },
+      { offsetMs: 65000, title: 'Fim' },
+    ])
+  })
+
+  it('descarta capítulos com título vazio', () => {
+    const raw = [
+      { startSeconds: 0, title: '  ' },
+      { startSeconds: 30, title: 'Meio' },
+    ]
+    expect(normalizeChapters(raw, segs)).toEqual([{ offsetMs: 0, title: 'Meio' }])
+  })
+
+  it('retorna lista vazia quando não há segmentos', () => {
+    expect(normalizeChapters([{ startSeconds: 0, title: 'x' }], [])).toEqual([])
+  })
+})
+
+describe('buildChaptersText', () => {
+  it('monta uma linha "M:SS Título" por capítulo', () => {
+    const text = buildChaptersText([
+      { offsetMs: 0, title: 'Introdução' },
+      { offsetMs: 154000, title: 'Ferramentas de IA' },
+      { offsetMs: 3723000, title: 'Conclusão' },
+    ])
+    expect(text).toBe('0:00 Introdução\n2:34 Ferramentas de IA\n1:02:03 Conclusão')
+  })
+
+  it('retorna string vazia para lista vazia', () => {
+    expect(buildChaptersText([])).toBe('')
   })
 })

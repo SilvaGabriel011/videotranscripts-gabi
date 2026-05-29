@@ -22,8 +22,10 @@ import {
   sanitizeFilename,
   buildPlainText,
   buildSrt,
+  buildChaptersText,
   type Segment,
 } from './transcript-utils.ts'
+import { segmentTopics } from './topic-segmenter.ts'
 
 const WHISPER_SIZE_LIMIT = 24 * 1024 * 1024 // 24MB (limite real da API: 25MB)
 const CHUNK_SECONDS = 600 // 10 min por pedaço no chunking
@@ -250,7 +252,11 @@ function writeOutputs(stem: string, segments: Segment[]): { txt: string; srt: st
 // Processamento de uma URL
 // ---------------------------------------------------------------------------
 
-async function processOne(url: string, lang: string | undefined): Promise<ProcessResult> {
+async function processOne(
+  url: string,
+  lang: string | undefined,
+  topics: boolean,
+): Promise<ProcessResult> {
   const videoId = extractVideoId(url)
   if (!videoId) {
     return { url, status: 'erro', reason: 'URL inválida (não foi possível extrair o video ID)' }
