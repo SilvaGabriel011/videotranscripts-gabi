@@ -1,0 +1,22 @@
+{
+  "name": "youtube-transcript-extractor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Extrai transcripts de vídeos do YouTube (legendas + fallback Whisper) para .txt",
+  "scripts": {
+    "transcript:youtube": "tsx scripts/youtube-transcript.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "openai": "^4.104.0",
+    "youtube-transcript": "^1.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
