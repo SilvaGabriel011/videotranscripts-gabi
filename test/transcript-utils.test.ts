@@ -12,7 +12,7 @@ import {
   normalizeChapters,
   buildChaptersText,
   type Segment,
-} from '../scripts/transcript-utils'
+} from '../lib/transcript-utils'
 
 describe('extractVideoId', () => {
   it('extrai de URL watch?v=', () => {

@@ -16,7 +16,7 @@ import {
   normalizeChapters,
   type Segment,
   type Topic,
-} from './transcript-utils.ts'
+} from '../lib/transcript-utils'
 
 type RawChapter = { startSeconds: number; title: string }
 

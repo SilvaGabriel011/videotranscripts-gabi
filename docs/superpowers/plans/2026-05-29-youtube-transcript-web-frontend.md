@@ -62,10 +62,17 @@ Expected: `ok: nenhum txt/srt rastreado`
 
 ## Task 2: Mover utils para `lib/` e atualizar imports
 
+> NOTA: o projeto ganhou uma feature de capítulos (`scripts/topic-segmenter.ts` +
+> `buildChaptersText`/`normalizeChapters`/`formatChapterTimestamp`/`Topic` em
+> transcript-utils + flag `--topics` no CLI). **Preservar tudo isso.** O `git mv`
+> move o arquivo inteiro (mantém as funções de capítulo); só precisamos consertar
+> o import do `topic-segmenter.ts` também.
+
 **Files:**
 - Create: `lib/transcript-utils.ts` (conteúdo movido de `scripts/transcript-utils.ts`)
-- Modify: `scripts/youtube-transcript.ts:19-26` (import path)
-- Modify: `test/transcript-utils.test.ts:2-12` (import path)
+- Modify: `scripts/youtube-transcript.ts` (import path)
+- Modify: `scripts/topic-segmenter.ts` (import path)
+- Modify: `test/transcript-utils.test.ts` (import path)
 
 - [ ] **Step 1: Mover o arquivo preservando histórico**
 
@@ -77,37 +84,31 @@ Expected: `lib/transcript-utils.ts` existe; `scripts/transcript-utils.ts` some.
 
 - [ ] **Step 2: Atualizar o import no teste**
 
-Em `test/transcript-utils.test.ts`, trocar:
-```ts
-} from '../scripts/transcript-utils'
-```
-por:
-```ts
-} from '../lib/transcript-utils'
-```
+Em `test/transcript-utils.test.ts`, trocar `from '../scripts/transcript-utils'` por
+`from '../lib/transcript-utils'` (manter todos os nomes importados, inclusive os de capítulo).
 
-- [ ] **Step 3: Atualizar o import no CLI (extensionless)**
+- [ ] **Step 3: Atualizar o import no CLI**
 
-Em `scripts/youtube-transcript.ts`, trocar o bloco de import:
-```ts
-} from './transcript-utils.ts'
-```
-por:
-```ts
-} from '../lib/transcript-utils'
-```
+Em `scripts/youtube-transcript.ts`, na linha de import dos utils, trocar
+`from './transcript-utils.ts'` por `from '../lib/transcript-utils'` (manter os nomes, inclusive
+`buildChaptersText`). O import `from './topic-segmenter.ts'` NÃO muda.
 
-- [ ] **Step 4: Rodar os testes — devem continuar verdes**
+- [ ] **Step 4: Atualizar o import no topic-segmenter**
+
+Em `scripts/topic-segmenter.ts`, trocar `from './transcript-utils.ts'` por
+`from '../lib/transcript-utils'`.
+
+- [ ] **Step 5: Rodar os testes — devem continuar verdes**
 
 Run: `npx vitest run`
-Expected: PASS, **42 testes** (nada quebra; só mudou a localização).
+Expected: PASS, **53 testes** (nada quebra; só mudou a localização).
 
-- [ ] **Step 5: Type-check**
+- [ ] **Step 6: Type-check**
 
 Run: `npx tsc --noEmit`
 Expected: 0 erros.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add -A && git commit -m "refactor: mover transcript-utils para lib/"
@@ -117,9 +118,18 @@ git add -A && git commit -m "refactor: mover transcript-utils para lib/"
 
 ## Task 3: Extrair `lib/extractor.ts` e enxugar o CLI
 
+> **NOTA — PRESERVAR CAPÍTULOS.** O `youtube-transcript.ts` atual tem a feature
+> `--topics` (gera `<Título>.chapters.txt` via `segmentTopics` + `buildChaptersText`).
+> Esta task é um **refactor cirúrgico**, NÃO um rewrite que apague capítulos:
+> mover só os helpers de extração para `lib/extractor.ts` e fazer o `processOne`
+> chamar `extractTranscript`. O bloco de capítulos, `parseArgs` com `topics`,
+> `printUsage`, `resolveOutputStem`, `writeOutputs` e o type `ProcessResult`
+> **permanecem**. O esqueleto no Step 2 abaixo omite os capítulos por brevidade —
+> use o `processOne`/imports corrigidos do Step 2b como autoridade.
+
 **Files:**
 - Create: `lib/extractor.ts`
-- Modify: `scripts/youtube-transcript.ts` (remove helpers movidos; `processOne` usa `extractTranscript`)
+- Modify: `scripts/youtube-transcript.ts` (remove só os helpers de extração; `processOne` usa `extractTranscript`; mantém capítulos)
 
 - [ ] **Step 1: Criar `lib/extractor.ts`**
 
@@ -482,6 +492,75 @@ main().catch((err) => {
 })
 ```
 
+- [ ] **Step 2b: Imports e `processOne` corrigidos (AUTORIDADE — preservam capítulos)**
+
+Imports do topo do `scripts/youtube-transcript.ts`:
+```ts
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import {
+  sanitizeFilename,
+  buildPlainText,
+  buildSrt,
+  buildChaptersText,
+  type Segment,
+} from '../lib/transcript-utils'
+import { extractTranscript } from '../lib/extractor'
+import { segmentTopics } from './topic-segmenter'
+```
+
+`processOne` (delega extração ao `extractTranscript`, mantém .txt/.srt e o bloco de capítulos):
+```ts
+async function processOne(
+  url: string,
+  lang: string | undefined,
+  topics: boolean,
+): Promise<ProcessResult> {
+  let result
+  try {
+    result = await extractTranscript(url, { lang })
+  } catch (err) {
+    return { url, status: 'erro', reason: err instanceof Error ? err.message : String(err) }
+  }
+
+  const baseName = result.title ? sanitizeFilename(result.title) : ''
+  const stem = resolveOutputStem(process.cwd(), baseName || result.videoId)
+  const out = writeOutputs(stem, result.segments)
+
+  const preview = buildPlainText(result.segments).slice(0, 200)
+  console.log(
+    `   ✓ ${out.txt} + ${out.srt} (${result.segments.length} segmentos, fonte: ${result.source})`,
+  )
+  console.log(`     "${preview}${preview.length >= 200 ? '...' : ''}"`)
+
+  let chaptersFile: string | undefined
+  if (topics) {
+    try {
+      const chapters = await segmentTopics(result.segments, { lang, videoTitle: result.title })
+      if (chapters.length > 0) {
+        const chaptersPath = `${stem}.chapters.txt`
+        fs.writeFileSync(chaptersPath, buildChaptersText(chapters) + '\n', 'utf-8')
+        chaptersFile = path.basename(chaptersPath)
+        console.log(`   ✓ ${chaptersFile} (${chapters.length} capítulos por tema)`)
+      } else {
+        console.log('   ⚠ temas: nenhum capítulo gerado')
+      }
+    } catch (topicErr) {
+      console.log(`   ⚠ temas: ${topicErr instanceof Error ? topicErr.message : String(topicErr)}`)
+    }
+  }
+
+  const files = chaptersFile
+    ? `${out.txt} + ${out.srt} + ${chaptersFile}`
+    : `${out.txt} + ${out.srt}`
+  return { url, status: 'ok', file: files, source: result.source }
+}
+```
+`parseArgs` (mantém `topics`), `printUsage` (mantém linha `--topics`), `resolveOutputStem`,
+`writeOutputs`, type `ProcessResult` e `main` (segue passando `topics` ao `processOne`) ficam como
+no arquivo atual. Remover a chamada `loadEnv()` do início da `main` (o `extractTranscript` já o faz)
+e os imports não mais usados (`os`, `spawnSync`, `extractVideoId`, `decodeHtmlEntities`).
+
 - [ ] **Step 3: Type-check**
 
 Run: `npx tsc --noEmit`
@@ -490,7 +569,7 @@ Expected: 0 erros.
 - [ ] **Step 4: Testes ainda verdes**
 
 Run: `npx vitest run`
-Expected: PASS, 42 testes.
+Expected: PASS, 53 testes.
 
 - [ ] **Step 5: Regressão e2e do CLI (caminho de legendas)**
 
@@ -748,7 +827,7 @@ Expected: PASS, 2 testes.
 - [ ] **Step 5: Suite completa + type-check**
 
 Run: `npx vitest run && npx tsc --noEmit`
-Expected: PASS 44 testes; tsc 0 erros.
+Expected: PASS 55 testes (53 + 2 da rota); tsc 0 erros.
 
 - [ ] **Step 6: Verificação e2e da rota (caminho feliz, com rede)**
 
@@ -1017,7 +1096,7 @@ Run:
 ```bash
 cd "D:/youtube transcripts" && npx vitest run && npx tsc --noEmit
 ```
-Expected: 44 testes PASS; tsc 0 erros.
+Expected: 55 testes PASS; tsc 0 erros.
 
 - [ ] **Step 2: Escrever `README.md`**
 

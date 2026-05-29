@@ -24,7 +24,7 @@ import {
   buildSrt,
   buildChaptersText,
   type Segment,
-} from './transcript-utils.ts'
+} from '../lib/transcript-utils'
 import { segmentTopics } from './topic-segmenter.ts'
 
 const WHISPER_SIZE_LIMIT = 24 * 1024 * 1024 // 24MB (limite real da API: 25MB)
@@ -361,7 +361,7 @@ function printUsage(): void {
 
 async function main(): Promise<void> {
   loadEnv()
-  const { lang, urls } = parseArgs(process.argv.slice(2))
+  const { lang, topics, urls } = parseArgs(process.argv.slice(2))
 
   if (urls.length === 0) {
     printUsage()
@@ -373,7 +373,7 @@ async function main(): Promise<void> {
   for (let i = 0; i < urls.length; i++) {
     console.log(`\n[${i + 1}/${urls.length}] Processando ${urls[i]}`)
     try {
-      results.push(await processOne(urls[i], lang))
+      results.push(await processOne(urls[i], lang, topics))
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       results.push({ url: urls[i], status: 'erro', reason: msg })
