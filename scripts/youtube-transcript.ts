@@ -292,15 +292,39 @@ async function processOne(
   const preview = buildPlainText(segments).slice(0, 200)
   console.log(`   ✓ ${out.txt} + ${out.srt} (${segments.length} segmentos, fonte: ${source})`)
   console.log(`     "${preview}${preview.length >= 200 ? '...' : ''}"`)
-  return { url, status: 'ok', file: `${out.txt} + ${out.srt}`, source }
+
+  // Segmentação por temas (opt-in). Falha aqui não derruba o .txt/.srt já gravados.
+  let chaptersFile: string | undefined
+  if (topics) {
+    try {
+      const chapters = await segmentTopics(segments, { lang, videoTitle: title })
+      if (chapters.length > 0) {
+        const chaptersPath = `${stem}.chapters.txt`
+        fs.writeFileSync(chaptersPath, buildChaptersText(chapters) + '\n', 'utf-8')
+        chaptersFile = path.basename(chaptersPath)
+        console.log(`   ✓ ${chaptersFile} (${chapters.length} capítulos por tema)`)
+      } else {
+        console.log('   ⚠ temas: nenhum capítulo gerado')
+      }
+    } catch (topicErr) {
+      const msg = topicErr instanceof Error ? topicErr.message : String(topicErr)
+      console.log(`   ⚠ temas: ${msg}`)
+    }
+  }
+
+  const files = chaptersFile
+    ? `${out.txt} + ${out.srt} + ${chaptersFile}`
+    : `${out.txt} + ${out.srt}`
+  return { url, status: 'ok', file: files, source }
 }
 
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
-function parseArgs(argv: string[]): { lang?: string; urls: string[] } {
+function parseArgs(argv: string[]): { lang?: string; topics: boolean; urls: string[] } {
   let lang: string | undefined
+  let topics = false
   const urls: string[] = []
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -308,24 +332,28 @@ function parseArgs(argv: string[]): { lang?: string; urls: string[] } {
       lang = argv[++i]
     } else if (arg.startsWith('--lang=')) {
       lang = arg.slice('--lang='.length)
+    } else if (arg === '--topics') {
+      topics = true
     } else if (arg.startsWith('--')) {
       console.warn(`Flag desconhecida ignorada: ${arg}`)
     } else {
       urls.push(arg)
     }
   }
-  return { lang, urls }
+  return { lang, topics, urls }
 }
 
 function printUsage(): void {
   console.log(
     [
-      'Uso: tsx scripts/youtube-transcript.ts [--lang <código>] <url> [url2 ...]',
+      'Uso: tsx scripts/youtube-transcript.ts [--lang <código>] [--topics] <url> [url2 ...]',
       '',
       'Exemplos:',
       '  tsx scripts/youtube-transcript.ts "https://youtu.be/dQw4w9WgXcQ"',
       '  tsx scripts/youtube-transcript.ts --lang pt "https://youtu.be/ID1" "https://youtu.be/ID2"',
+      '  tsx scripts/youtube-transcript.ts --topics "https://youtu.be/ID"',
       '',
+      '--topics gera também <Título>.chapters.txt (capítulos por tema via IA) e requer OPENAI_API_KEY.',
       'O fallback Whisper (vídeos sem legenda) requer OPENAI_API_KEY, yt-dlp e ffmpeg.',
     ].join('\n'),
   )
