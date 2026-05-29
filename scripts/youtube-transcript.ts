@@ -24,8 +24,6 @@ import {
 import { extractTranscript } from '../lib/extractor'
 import { segmentTopics } from './topic-segmenter'
 
-const OUTPUT_DIR = 'output' // subpasta (relativa ao CWD) onde os resultados são gravados
-
 type ProcessResult =
   | { url: string; status: 'ok'; file: string; source: string }
   | { url: string; status: 'erro'; reason: string }
@@ -84,14 +82,12 @@ async function processOne(
   }
 
   const baseName = result.title ? sanitizeFilename(result.title) : ''
-  const outputDir = path.join(process.cwd(), OUTPUT_DIR)
-  fs.mkdirSync(outputDir, { recursive: true })
-  const stem = resolveOutputStem(outputDir, baseName || result.videoId)
+  const stem = resolveOutputStem(process.cwd(), baseName || result.videoId)
   const out = writeOutputs(stem, result.segments)
 
   const preview = buildPlainText(result.segments).slice(0, 200)
   console.log(
-    `   ✓ ${OUTPUT_DIR}/${out.txt} + ${OUTPUT_DIR}/${out.srt} (${result.segments.length} segmentos, fonte: ${result.source})`,
+    `   ✓ ${out.txt} + ${out.srt} (${result.segments.length} segmentos, fonte: ${result.source})`,
   )
   console.log(`     "${preview}${preview.length >= 200 ? '...' : ''}"`)
 
@@ -103,7 +99,7 @@ async function processOne(
         const chaptersPath = `${stem}.chapters.txt`
         fs.writeFileSync(chaptersPath, buildChaptersText(chapters) + '\n', 'utf-8')
         chaptersFile = path.basename(chaptersPath)
-        console.log(`   ✓ ${OUTPUT_DIR}/${chaptersFile} (${chapters.length} capítulos por tema)`)
+        console.log(`   ✓ ${chaptersFile} (${chapters.length} capítulos por tema)`)
       } else {
         console.log('   ⚠ temas: nenhum capítulo gerado')
       }
@@ -115,7 +111,7 @@ async function processOne(
   const names = chaptersFile
     ? `${out.txt} + ${out.srt} + ${chaptersFile}`
     : `${out.txt} + ${out.srt}`
-  return { url, status: 'ok', file: `${OUTPUT_DIR}/ → ${names}`, source: result.source }
+  return { url, status: 'ok', file: names, source: result.source }
 }
 
 // ---------------------------------------------------------------------------
