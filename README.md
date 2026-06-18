@@ -73,6 +73,36 @@ A saída da CLI vai para `output/<título-do-vídeo>/` (uma pasta por vídeo).
 
 ---
 
+## Deploy na Vercel
+
+O app web é Next.js, então a Vercel hospeda com configuração zero.
+
+1. Suba o repositório no GitHub e, em **vercel.com → Add New → Project**, importe-o.
+   A Vercel detecta o Next.js automaticamente (não precisa configurar build).
+2. Em **Settings → Environment Variables**, adicione (para os recursos de IA):
+   - `OPENAI_API_KEY` — sua chave (necessária para `--topics` e para o fallback Whisper).
+   - opcional: `OPENAI_TRANSCRIBE_MODEL`, `OPENAI_TOPICS_MODEL`.
+   - opcional: `YOUTUBE_COOKIE` — veja abaixo.
+3. Deploy.
+
+**O que funciona no serverless:**
+- Extração de legendas (a maioria dos vídeos) — sem dependências externas.
+- Capítulos por tema + custo (`--topics`) — só usa a API da OpenAI.
+- Fallback Whisper (vídeos **sem** legenda) — funciona via `@distube/ytdl-core` (JS puro),
+  sem precisar de `yt-dlp`/`ffmpeg`. **Localmente**, se você tiver `yt-dlp` + `ffmpeg`
+  instalados, o app usa esse caminho (suporta vídeos longos com chunking).
+
+**Limitações do fallback Whisper na Vercel:**
+- **Bloqueio de IP:** o YouTube costuma barrar IPs de data center ("confirme que você não é
+  um robô"). Se o download falhar, defina `YOUTUBE_COOKIE` (array JSON de cookies exportado
+  por uma extensão do navegador) para autenticar as requisições.
+- **Vídeos longos:** sem `ffmpeg` para dividir o áudio, vídeos cujo áudio passe de ~25MB
+  (≈ 30–45 min) excedem o limite do Whisper e retornam erro. Para esses, use a CLI local.
+- **Timeout:** a transcrição pode demorar; o plano **Hobby** limita a função a 60s e o
+  **Pro** a 300s (`maxDuration` já está em 300 na rota). Extração de legenda é rápida.
+- O backup em `output/` não funciona (filesystem read-only), mas isso é best-effort e
+  **não** atrapalha o download — o ZIP é gerado normalmente.
+
 ## Segurança — leia antes de compartilhar a pasta
 
 - **Cada pessoa usa a PRÓPRIA chave OpenAI.** Não compartilhe a sua.
