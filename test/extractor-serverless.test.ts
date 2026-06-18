@@ -1,95 +1,118 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-
-// Mocka o ytdl-core ANTES de importar o módulo sob teste. A factory é auto-contida
-// (sem referenciar variáveis externas) por causa do hoisting do vi.mock.
-vi.mock('@distube/ytdl-core', () => ({
-  default: {
-    getInfo: vi.fn(),
-    chooseFormat: vi.fn(),
-    downloadFromInfo: vi.fn(),
-    createAgent: vi.fn((cookies: unknown) => ({ agent: true, cookies })),
-  },
-}))
-
 import * as os from 'node:os'
-import ytdl from '@distube/ytdl-core'
-import { buildYtdlAgent, downloadAudioServerless } from '../lib/extractor'
+import type { YT } from 'youtubei.js'
+import {
+  youtubeSessionOptions,
+  transcriptToSegments,
+  downloadAudioServerless,
+  type RawTranscriptSegment,
+} from '../lib/extractor'
 
 const MB = 1024 * 1024
 
-describe('buildYtdlAgent', () => {
-  const original = process.env.YOUTUBE_COOKIE
-  // ytdl mockado só pra capturar a chamada de createAgent.
-  const fakeYtdl = { createAgent: vi.fn((c: unknown) => ({ ok: true, c })) }
+describe('youtubeSessionOptions', () => {
+  const KEYS = ['YOUTUBE_COOKIE', 'YOUTUBE_VISITOR_DATA', 'YOUTUBE_PO_TOKEN'] as const
+  const saved: Record<string, string | undefined> = {}
 
   beforeEach(() => {
-    fakeYtdl.createAgent.mockClear()
-    delete process.env.YOUTUBE_COOKIE
+    for (const k of KEYS) {
+      saved[k] = process.env[k]
+      delete process.env[k]
+    }
   })
   afterEach(() => {
-    if (original === undefined) delete process.env.YOUTUBE_COOKIE
-    else process.env.YOUTUBE_COOKIE = original
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k]
+      else process.env[k] = saved[k]
+    }
   })
 
-  it('retorna undefined quando YOUTUBE_COOKIE não está definido', () => {
-    expect(buildYtdlAgent(fakeYtdl as never)).toBeUndefined()
-    expect(fakeYtdl.createAgent).not.toHaveBeenCalled()
+  it('retorna objeto vazio quando nenhuma variável está definida', () => {
+    expect(youtubeSessionOptions()).toEqual({})
   })
 
-  it('retorna undefined (sem lançar) quando o cookie é JSON inválido', () => {
-    process.env.YOUTUBE_COOKIE = 'isto não é json'
-    expect(buildYtdlAgent(fakeYtdl as never)).toBeUndefined()
-    expect(fakeYtdl.createAgent).not.toHaveBeenCalled()
+  it('inclui apenas o cookie quando só ele está definido (com trim)', () => {
+    process.env.YOUTUBE_COOKIE = '  SID=abc; HSID=def  '
+    expect(youtubeSessionOptions()).toEqual({ cookie: 'SID=abc; HSID=def' })
   })
 
-  it('cria o agent a partir do array JSON de cookies', () => {
-    const cookies = [{ name: 'SID', value: 'abc', domain: '.youtube.com' }]
-    process.env.YOUTUBE_COOKIE = JSON.stringify(cookies)
-    const agent = buildYtdlAgent(fakeYtdl as never)
-    expect(fakeYtdl.createAgent).toHaveBeenCalledWith(cookies)
-    expect(agent).toEqual({ ok: true, c: cookies })
+  it('ignora valores vazios/em branco', () => {
+    process.env.YOUTUBE_COOKIE = '   '
+    expect(youtubeSessionOptions()).toEqual({})
+  })
+
+  it('inclui visitor_data e po_token quando definidos', () => {
+    process.env.YOUTUBE_COOKIE = 'SID=abc'
+    process.env.YOUTUBE_VISITOR_DATA = 'visitor123'
+    process.env.YOUTUBE_PO_TOKEN = 'po123'
+    expect(youtubeSessionOptions()).toEqual({
+      cookie: 'SID=abc',
+      visitor_data: 'visitor123',
+      po_token: 'po123',
+    })
+  })
+})
+
+describe('transcriptToSegments', () => {
+  it('mapeia segmentos, decodifica entidades e calcula a duração', () => {
+    const raw: RawTranscriptSegment[] = [
+      { snippet: { text: 'Olá &amp; bem-vindo' }, start_ms: '0', end_ms: '1500' },
+      { snippet: { text: '  segundo trecho  ' }, start_ms: '1500', end_ms: '4000' },
+    ]
+    expect(transcriptToSegments(raw)).toEqual([
+      { text: 'Olá & bem-vindo', offset: 0, duration: 1500 },
+      { text: 'segundo trecho', offset: 1500, duration: 2500 },
+    ])
+  })
+
+  it('ignora cabeçalhos de seção (sem start_ms) e trechos vazios', () => {
+    const raw: RawTranscriptSegment[] = [
+      { snippet: { text: 'Capítulo 1' } }, // cabeçalho de seção -> ignorado
+      { snippet: { text: 'conteúdo' }, start_ms: '2000', end_ms: '3000' },
+      { snippet: { text: '   ' }, start_ms: '3000', end_ms: '4000' }, // vazio -> ignorado
+    ]
+    expect(transcriptToSegments(raw)).toEqual([
+      { text: 'conteúdo', offset: 2000, duration: 1000 },
+    ])
+  })
+
+  it('lança quando não sobra nenhum segmento', () => {
+    expect(() => transcriptToSegments([])).toThrow(/Nenhuma legenda/)
+    expect(() => transcriptToSegments([{ snippet: { text: 'header' } }])).toThrow(/Nenhuma legenda/)
   })
 })
 
 describe('downloadAudioServerless', () => {
-  beforeEach(() => {
-    vi.mocked(ytdl.getInfo).mockReset()
-    vi.mocked(ytdl.chooseFormat).mockReset()
-    vi.mocked(ytdl.downloadFromInfo).mockReset()
-    delete process.env.YOUTUBE_COOKIE
-  })
-
-  it('embrulha falha do getInfo com dica de bloqueio de IP / YOUTUBE_COOKIE', async () => {
-    vi.mocked(ytdl.getInfo).mockRejectedValue(new Error("Sign in to confirm you're not a bot"))
-    await expect(downloadAudioServerless('https://youtu.be/x', 'x', os.tmpdir())).rejects.toThrow(
-      /YOUTUBE_COOKIE/,
-    )
-    await expect(
-      downloadAudioServerless('https://youtu.be/x', 'x', os.tmpdir()),
-    ).rejects.toThrow(/ytdl-core/)
-  })
+  // Fake mínimo de VideoInfo: só chooseFormat + download.
+  function fakeInfo(over: {
+    format?: { content_length?: number; mime_type?: string }
+    chooseThrows?: boolean
+  }) {
+    return {
+      chooseFormat: vi.fn(() => {
+        if (over.chooseThrows) throw new Error('No matching formats found')
+        return over.format ?? { content_length: 1 * MB, mime_type: 'audio/webm' }
+      }),
+      download: vi.fn(),
+    } as unknown as Pick<YT.VideoInfo, 'chooseFormat' | 'download'> & {
+      chooseFormat: ReturnType<typeof vi.fn>
+      download: ReturnType<typeof vi.fn>
+    }
+  }
 
   it('mensagem clara quando não há formato de áudio (chooseFormat lança)', async () => {
-    vi.mocked(ytdl.getInfo).mockResolvedValue({ formats: [] } as never)
-    vi.mocked(ytdl.chooseFormat).mockImplementation(() => {
-      throw new Error('No such format found: lowestaudio')
-    })
-    await expect(
-      downloadAudioServerless('https://youtu.be/x', 'x', os.tmpdir()),
-    ).rejects.toThrow(/Nenhum formato de áudio/)
+    const info = fakeInfo({ chooseThrows: true })
+    await expect(downloadAudioServerless(info, 'x', os.tmpdir())).rejects.toThrow(
+      /Nenhum formato de áudio/,
+    )
+    expect(info.download).not.toHaveBeenCalled()
   })
 
-  it('falha rápida (sem baixar) quando o contentLength já passa de 25MB', async () => {
-    vi.mocked(ytdl.getInfo).mockResolvedValue({ formats: [{}] } as never)
-    vi.mocked(ytdl.chooseFormat).mockReturnValue({
-      container: 'webm',
-      contentLength: String(30 * MB),
-    } as never)
-
-    await expect(
-      downloadAudioServerless('https://youtu.be/x', 'x', os.tmpdir()),
-    ).rejects.toThrow(/excede o limite de 25MB/)
-    // Não deve nem tentar baixar.
-    expect(ytdl.downloadFromInfo).not.toHaveBeenCalled()
+  it('falha rápida (sem baixar) quando o content_length já passa de 25MB', async () => {
+    const info = fakeInfo({ format: { content_length: 30 * MB, mime_type: 'audio/webm' } })
+    await expect(downloadAudioServerless(info, 'x', os.tmpdir())).rejects.toThrow(
+      /excede o limite de 25MB/,
+    )
+    expect(info.download).not.toHaveBeenCalled()
   })
 })

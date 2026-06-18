@@ -2,7 +2,13 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { spawnSync } from 'node:child_process'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import { Innertube, type YT } from 'youtubei.js'
 import { extractVideoId, decodeHtmlEntities, type Segment } from './transcript-utils'
+
+/** Info de vídeo da youtubei.js (namespace YT). */
+type VideoInfo = YT.VideoInfo
 
 const WHISPER_SIZE_LIMIT = 24 * 1024 * 1024 // 24MB (limite real da API: 25MB)
 const CHUNK_SECONDS = 600 // 10 min por pedaço no chunking
@@ -30,57 +36,9 @@ function hasCommand(cmd: string, versionFlag = '--version'): boolean {
   return res.status === 0
 }
 
-/** Busca o título do vídeo via oEmbed (sem API key). Retorna null em falha. */
-async function getVideoTitle(videoId: string): Promise<string | null> {
-  try {
-    const res = await fetch(
-      `https://www.youtube.com/oembed?url=https://youtu.be/${videoId}&format=json`,
-    )
-    if (!res.ok) return null
-    const data = (await res.json()) as { title?: string }
-    return data.title ?? null
-  } catch {
-    return null
-  }
-}
-
-/** Busca legendas via `youtube-transcript` (offset/duration em ms). Lança erro se não houver. */
-async function fetchYoutubeCaptions(videoId: string, lang?: string): Promise<Segment[]> {
-  const { YoutubeTranscript } = await import('youtube-transcript')
-  const raw = await YoutubeTranscript.fetchTranscript(videoId, lang ? { lang } : undefined)
-  if (!raw || raw.length === 0) {
-    throw new Error('Nenhuma legenda retornada')
-  }
-  return raw.map((r) => ({
-    text: decodeHtmlEntities(String(r.text).trim()),
-    offset: Math.round(Number(r.offset)),
-    duration: Math.round(Number(r.duration)),
-  }))
-}
-
 /** Mensagem de erro legível a partir de um valor desconhecido. */
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
-}
-
-/**
- * Monta um agent do ytdl-core com cookies (opcional), para autenticar requisições.
- * IPs de data center (Vercel, etc.) costumam ser barrados pelo YouTube ("confirme que
- * você não é um robô"); passar um cookie de sessão contorna isso. Formato do
- * `YOUTUBE_COOKIE`: o array JSON exportado por uma extensão de cookies do navegador.
- */
-type Ytdl = typeof import('@distube/ytdl-core')
-type YtdlAgent = ReturnType<Ytdl['createAgent']>
-
-export function buildYtdlAgent(ytdl: Ytdl): YtdlAgent | undefined {
-  const cookie = process.env.YOUTUBE_COOKIE
-  if (!cookie) return undefined
-  try {
-    return ytdl.createAgent(JSON.parse(cookie))
-  } catch {
-    // cookie em formato inválido — segue sem agent (pode falhar por bot-check)
-    return undefined
-  }
 }
 
 /** Lança erro claro se o áudio passa do limite do Whisper (sem ffmpeg p/ dividir aqui). */
@@ -93,61 +51,129 @@ function assertWithinWhisperLimit(sizeBytes: number): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Sessão da youtubei.js (InnerTube) — usada para legenda E áudio
+// ---------------------------------------------------------------------------
+
+export type YoutubeSessionOptions = {
+  cookie?: string
+  visitor_data?: string
+  po_token?: string
+}
+
 /**
- * Caminho serverless (Vercel etc.): baixa o áudio em JS puro com `@distube/ytdl-core`,
- * sem depender de `yt-dlp`/`ffmpeg`. Escolhe o menor formato só-áudio e grava em tmpDir.
- * Sem ffmpeg não há como dividir: se passar do limite do Whisper, lança erro claro.
- * Exportada para teste.
+ * Lê a config de sessão do ambiente. IPs de data center (Vercel etc.) costumam ser
+ * bloqueados pelo YouTube ("confirme que você não é um robô"); `YOUTUBE_COOKIE` (string de
+ * cookies do navegador) autentica TODAS as requisições — tanto a legenda quanto o áudio.
+ * `YOUTUBE_VISITOR_DATA`/`YOUTUBE_PO_TOKEN` são opções avançadas anti-bot (opcionais).
+ */
+export function youtubeSessionOptions(): YoutubeSessionOptions {
+  const opts: YoutubeSessionOptions = {}
+  const cookie = process.env.YOUTUBE_COOKIE?.trim()
+  const visitorData = process.env.YOUTUBE_VISITOR_DATA?.trim()
+  const poToken = process.env.YOUTUBE_PO_TOKEN?.trim()
+  if (cookie) opts.cookie = cookie
+  if (visitorData) opts.visitor_data = visitorData
+  if (poToken) opts.po_token = poToken
+  return opts
+}
+
+async function createYoutube(): Promise<Innertube> {
+  return Innertube.create(youtubeSessionOptions())
+}
+
+// ---------------------------------------------------------------------------
+// Legendas (via InnerTube)
+// ---------------------------------------------------------------------------
+
+/** Forma mínima de um segmento cru de transcrição da youtubei.js. */
+export type RawTranscriptSegment = {
+  start_ms?: string | number
+  end_ms?: string | number
+  snippet?: { text?: string } | null
+}
+
+/**
+ * Converte os segmentos crus da youtubei.js em `Segment[]`. Pula cabeçalhos de seção
+ * (que não têm `start_ms`/`snippet`) e trechos vazios. Lança se sobrar nada. Exportada p/ teste.
+ */
+export function transcriptToSegments(rawSegments: ReadonlyArray<RawTranscriptSegment>): Segment[] {
+  const out: Segment[] = []
+  for (const s of rawSegments) {
+    if (!s || s.start_ms == null || !s.snippet) continue // ignora cabeçalhos de seção
+    const text = decodeHtmlEntities(String(s.snippet.text ?? '').trim())
+    if (!text) continue
+    const offset = Math.round(Number(s.start_ms))
+    const end = Math.round(Number(s.end_ms))
+    const duration = Number.isFinite(end) ? Math.max(0, end - offset) : 0
+    out.push({ text, offset, duration })
+  }
+  if (out.length === 0) throw new Error('Nenhuma legenda retornada')
+  return out
+}
+
+/** Busca a transcrição do vídeo via InnerTube, escolhendo o idioma quando disponível. */
+async function fetchYoutubeCaptions(info: VideoInfo, lang?: string): Promise<Segment[]> {
+  let tInfo = await info.getTranscript()
+  if (lang) {
+    try {
+      if (tInfo.languages?.includes(lang) && tInfo.selectedLanguage !== lang) {
+        tInfo = await tInfo.selectLanguage(lang)
+      }
+    } catch {
+      // idioma indisponível — mantém o padrão
+    }
+  }
+  const initial = tInfo.transcript.content?.body?.initial_segments ?? []
+  return transcriptToSegments(initial as unknown as RawTranscriptSegment[])
+}
+
+// ---------------------------------------------------------------------------
+// Fallback Whisper — áudio
+// ---------------------------------------------------------------------------
+
+/** Deriva a extensão de arquivo a partir do mime do formato de áudio. */
+function audioExtFromMime(mime: string | undefined): string {
+  if (mime?.includes('webm')) return 'webm'
+  return 'm4a'
+}
+
+/**
+ * Caminho serverless (Vercel etc.): baixa o áudio em JS puro com a youtubei.js, sem depender
+ * de `yt-dlp`/`ffmpeg`. Escolhe o menor formato só-áudio e grava em tmpDir. Sem ffmpeg não há
+ * como dividir: se passar do limite do Whisper, lança erro claro. Exportada p/ teste.
  */
 export async function downloadAudioServerless(
-  url: string,
+  info: Pick<VideoInfo, 'chooseFormat' | 'download'>,
   videoId: string,
   tmpDir: string,
 ): Promise<string> {
-  const ytdl = (await import('@distube/ytdl-core')).default
-  const agent = buildYtdlAgent(ytdl)
-
-  let info: Awaited<ReturnType<typeof ytdl.getInfo>>
+  // chooseFormat LANÇA quando não acha formato compatível.
+  let format: ReturnType<VideoInfo['chooseFormat']>
   try {
-    info = await ytdl.getInfo(url, agent ? { agent } : undefined)
-  } catch (e) {
-    throw new Error(
-      `Falha ao obter o vídeo via ytdl-core: ${errMsg(e)}. ` +
-        'IPs de data center (como os da Vercel) podem ser bloqueados pelo YouTube; ' +
-        'defina YOUTUBE_COOKIE para autenticar.',
-    )
-  }
-
-  // chooseFormat LANÇA quando não acha formato — não retorna falsy.
-  let format: ReturnType<typeof ytdl.chooseFormat>
-  try {
-    format = ytdl.chooseFormat(info.formats, { quality: 'lowestaudio', filter: 'audioonly' })
+    format = info.chooseFormat({ type: 'audio', quality: 'bestefficiency' })
   } catch {
     throw new Error('Nenhum formato de áudio disponível para este vídeo')
   }
 
   // Falha rápida: se o tamanho já vem no metadata e passa do limite, nem baixa.
-  assertWithinWhisperLimit(Number(format.contentLength))
+  assertWithinWhisperLimit(Number(format.content_length))
 
-  const ext = format.container || 'm4a'
-  const out = path.join(tmpDir, `${videoId}.${ext}`)
-  console.log('   Sem legenda — baixando áudio (ytdl-core) para transcrever via Whisper...')
+  const out = path.join(tmpDir, `${videoId}.${audioExtFromMime(format.mime_type)}`)
+  console.log('   Sem legenda — baixando áudio (youtubei.js) para transcrever via Whisper...')
 
-  await new Promise<void>((resolve, reject) => {
-    const stream = ytdl.downloadFromInfo(info, agent ? { format, agent } : { format })
-    const file = fs.createWriteStream(out)
-    stream.on('error', reject)
-    file.on('error', reject)
-    file.on('finish', () => resolve())
-    stream.pipe(file)
-  })
+  const stream = await info.download({ type: 'audio', quality: 'bestefficiency' })
+  await pipeline(
+    Readable.fromWeb(stream as unknown as import('node:stream/web').ReadableStream),
+    fs.createWriteStream(out),
+  )
 
-  // Confirmação após o download (contentLength pode não vir no metadata).
+  // Confirmação após o download (content_length pode não vir no metadata).
   assertWithinWhisperLimit(fs.statSync(out).size)
   return out
 }
 
-/** Baixa o áudio do vídeo como mp3 em tmpDir e retorna o caminho do arquivo. */
+/** Baixa o áudio do vídeo como mp3 em tmpDir e retorna o caminho do arquivo (via yt-dlp). */
 function downloadAudio(url: string, videoId: string, tmpDir: string): string {
   const outTemplate = path.join(tmpDir, `${videoId}.%(ext)s`)
   const res = spawnSync(
@@ -236,7 +262,12 @@ async function transcribeChunks(chunkPaths: string[], lang: string | undefined):
 }
 
 /** Orquestra o fallback completo: checagens → download → chunk → transcrição → limpeza. */
-async function whisperFallback(url: string, videoId: string, lang?: string): Promise<Segment[]> {
+async function whisperFallback(
+  info: VideoInfo,
+  url: string,
+  videoId: string,
+  lang?: string,
+): Promise<Segment[]> {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error(
       'Vídeo sem legenda e OPENAI_API_KEY não definida. Configure a chave (.env) para usar o Whisper.',
@@ -255,7 +286,7 @@ async function whisperFallback(url: string, videoId: string, lang?: string): Pro
       const audioPath = downloadAudio(url, videoId, tmpDir)
       chunks = splitIfNeeded(audioPath, videoId, tmpDir)
     } else {
-      chunks = [await downloadAudioServerless(url, videoId, tmpDir)]
+      chunks = [await downloadAudioServerless(info, videoId, tmpDir)]
     }
     console.log(`   Custo estimado do Whisper: ~US$0,006/min de áudio.`)
     return await transcribeChunks(chunks, lang)
@@ -277,21 +308,31 @@ export async function extractTranscript(
   if (!videoId) {
     throw new Error('URL inválida (não foi possível extrair o video ID)')
   }
-  const title = await getVideoTitle(videoId)
+
+  const yt = await createYoutube()
+  let info: VideoInfo
+  try {
+    info = await yt.getInfo(videoId)
+  } catch (e) {
+    throw new Error(
+      `Falha ao obter o vídeo (youtubei.js): ${errMsg(e)}. ` +
+        'IPs de data center (como os da Vercel) podem ser bloqueados pelo YouTube; ' +
+        'defina YOUTUBE_COOKIE para autenticar.',
+    )
+  }
+  const title = info.basic_info.title ?? null
 
   let segments: Segment[]
   let source: TranscriptSource
   try {
-    segments = await fetchYoutubeCaptions(videoId, opts.lang)
+    segments = await fetchYoutubeCaptions(info, opts.lang)
     source = 'YouTube Captions'
   } catch (captionErr) {
     try {
-      segments = await whisperFallback(url, videoId, opts.lang)
+      segments = await whisperFallback(info, url, videoId, opts.lang)
       source = 'OpenAI Whisper'
     } catch (whisperErr) {
-      const c = captionErr instanceof Error ? captionErr.message : String(captionErr)
-      const w = whisperErr instanceof Error ? whisperErr.message : String(whisperErr)
-      throw new Error(`legenda: ${c} | whisper: ${w}`)
+      throw new Error(`legenda: ${errMsg(captionErr)} | whisper: ${errMsg(whisperErr)}`)
     }
   }
   if (segments.length === 0) {

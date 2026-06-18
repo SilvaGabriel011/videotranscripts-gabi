@@ -86,21 +86,23 @@ O app web é Next.js, então a Vercel hospeda com configuração zero.
 3. Deploy.
 
 **O que funciona no serverless:**
-- Extração de legendas (a maioria dos vídeos) — sem dependências externas.
+- Extração de legendas (a maioria dos vídeos) — via `youtubei.js` (API InnerTube), sem
+  dependências externas.
 - Capítulos por tema + custo (`--topics`) — só usa a API da OpenAI.
-- Fallback Whisper (vídeos **sem** legenda) — funciona via `@distube/ytdl-core` (JS puro),
+- Fallback Whisper (vídeos **sem** legenda) — baixa o áudio via `youtubei.js` (JS puro),
   sem precisar de `yt-dlp`/`ffmpeg`. **Localmente**, se você tiver `yt-dlp` + `ffmpeg`
   instalados, o app usa esse caminho (suporta vídeos longos com chunking).
 
 **Limitações na Vercel:**
 - **Bloqueio de IP (afeta TUDO):** o YouTube costuma barrar IPs de data center ("confirme
-  que você não é um robô"). Isso atinge tanto o fallback Whisper quanto a própria extração
-  de legenda (a lib `youtube-transcript` faz scraping e **não** aceita cookie). Em produção,
-  espere que parte dos vídeos falhe; rodar localmente é mais confiável.
-- **Cookie do Whisper:** se o download de áudio falhar por bot-check, defina `YOUTUBE_COOKIE`
-  (array JSON de cookies exportado por uma extensão do navegador) para autenticar o ytdl-core.
-  ⚠️ O cookie dá acesso à conta Google — trate como senha, use conta descartável e configure-o
-  **só** no painel de variáveis da Vercel (nunca faça commit).
+  que você não é um robô"), atingindo tanto a legenda quanto o áudio do Whisper. A boa
+  notícia: como tudo passa pela `youtubei.js`, o `YOUTUBE_COOKIE` autentica **os dois** e
+  resolve a maioria dos casos. Sem cookie, espere que parte dos vídeos falhe em produção.
+- **Cookie (`YOUTUBE_COOKIE`):** a STRING do header Cookie do `youtube.com` (ex.:
+  `SID=...; HSID=...; SAPISID=...`), pega no DevTools (Network → requisição p/ youtube.com →
+  Request Headers → Cookie). ⚠️ Dá acesso à conta Google — trate como senha, use conta
+  descartável e configure **só** no painel de variáveis da Vercel (nunca faça commit).
+  Opcionais avançados anti-bot: `YOUTUBE_VISITOR_DATA` e `YOUTUBE_PO_TOKEN`.
 - **Vídeos longos:** sem `ffmpeg` para dividir o áudio, vídeos cujo áudio passe de ~25MB
   (≈ 30–45 min) excedem o limite do Whisper e retornam erro. Para esses, use a CLI local.
 - **Timeout:** a transcrição pode demorar. A rota usa `maxDuration = 60` (funciona em
