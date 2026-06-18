@@ -92,14 +92,20 @@ O app web é Next.js, então a Vercel hospeda com configuração zero.
   sem precisar de `yt-dlp`/`ffmpeg`. **Localmente**, se você tiver `yt-dlp` + `ffmpeg`
   instalados, o app usa esse caminho (suporta vídeos longos com chunking).
 
-**Limitações do fallback Whisper na Vercel:**
-- **Bloqueio de IP:** o YouTube costuma barrar IPs de data center ("confirme que você não é
-  um robô"). Se o download falhar, defina `YOUTUBE_COOKIE` (array JSON de cookies exportado
-  por uma extensão do navegador) para autenticar as requisições.
+**Limitações na Vercel:**
+- **Bloqueio de IP (afeta TUDO):** o YouTube costuma barrar IPs de data center ("confirme
+  que você não é um robô"). Isso atinge tanto o fallback Whisper quanto a própria extração
+  de legenda (a lib `youtube-transcript` faz scraping e **não** aceita cookie). Em produção,
+  espere que parte dos vídeos falhe; rodar localmente é mais confiável.
+- **Cookie do Whisper:** se o download de áudio falhar por bot-check, defina `YOUTUBE_COOKIE`
+  (array JSON de cookies exportado por uma extensão do navegador) para autenticar o ytdl-core.
+  ⚠️ O cookie dá acesso à conta Google — trate como senha, use conta descartável e configure-o
+  **só** no painel de variáveis da Vercel (nunca faça commit).
 - **Vídeos longos:** sem `ffmpeg` para dividir o áudio, vídeos cujo áudio passe de ~25MB
   (≈ 30–45 min) excedem o limite do Whisper e retornam erro. Para esses, use a CLI local.
-- **Timeout:** a transcrição pode demorar; o plano **Hobby** limita a função a 60s e o
-  **Pro** a 300s (`maxDuration` já está em 300 na rota). Extração de legenda é rápida.
+- **Timeout:** a transcrição pode demorar. A rota usa `maxDuration = 60` (funciona em
+  todos os planos; valores acima do limite do plano **fazem o deploy falhar**). Extração
+  de legenda é rápida. No **Pro/Enterprise** você pode subir para até 300 para vídeos longos.
 - O backup em `output/` não funciona (filesystem read-only), mas isso é best-effort e
   **não** atrapalha o download — o ZIP é gerado normalmente.
 

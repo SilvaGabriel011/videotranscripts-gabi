@@ -72,7 +72,7 @@ function errMsg(e: unknown): string {
 type Ytdl = typeof import('@distube/ytdl-core')
 type YtdlAgent = ReturnType<Ytdl['createAgent']>
 
-function buildYtdlAgent(ytdl: Ytdl): YtdlAgent | undefined {
+export function buildYtdlAgent(ytdl: Ytdl): YtdlAgent | undefined {
   const cookie = process.env.YOUTUBE_COOKIE
   if (!cookie) return undefined
   try {
@@ -83,12 +83,23 @@ function buildYtdlAgent(ytdl: Ytdl): YtdlAgent | undefined {
   }
 }
 
+/** Lança erro claro se o áudio passa do limite do Whisper (sem ffmpeg p/ dividir aqui). */
+function assertWithinWhisperLimit(sizeBytes: number): void {
+  if (Number.isFinite(sizeBytes) && sizeBytes > WHISPER_SIZE_LIMIT) {
+    throw new Error(
+      `Áudio com ${(sizeBytes / 1024 / 1024).toFixed(1)}MB excede o limite de 25MB do Whisper e ` +
+        'não há ffmpeg neste ambiente para dividir. Use a CLI local para vídeos longos.',
+    )
+  }
+}
+
 /**
  * Caminho serverless (Vercel etc.): baixa o áudio em JS puro com `@distube/ytdl-core`,
  * sem depender de `yt-dlp`/`ffmpeg`. Escolhe o menor formato só-áudio e grava em tmpDir.
  * Sem ffmpeg não há como dividir: se passar do limite do Whisper, lança erro claro.
+ * Exportada para teste.
  */
-async function downloadAudioServerless(
+export async function downloadAudioServerless(
   url: string,
   videoId: string,
   tmpDir: string,
@@ -107,8 +118,16 @@ async function downloadAudioServerless(
     )
   }
 
-  const format = ytdl.chooseFormat(info.formats, { quality: 'lowestaudio', filter: 'audioonly' })
-  if (!format) throw new Error('Nenhum formato de áudio disponível para este vídeo')
+  // chooseFormat LANÇA quando não acha formato — não retorna falsy.
+  let format: ReturnType<typeof ytdl.chooseFormat>
+  try {
+    format = ytdl.chooseFormat(info.formats, { quality: 'lowestaudio', filter: 'audioonly' })
+  } catch {
+    throw new Error('Nenhum formato de áudio disponível para este vídeo')
+  }
+
+  // Falha rápida: se o tamanho já vem no metadata e passa do limite, nem baixa.
+  assertWithinWhisperLimit(Number(format.contentLength))
 
   const ext = format.container || 'm4a'
   const out = path.join(tmpDir, `${videoId}.${ext}`)
@@ -123,13 +142,8 @@ async function downloadAudioServerless(
     stream.pipe(file)
   })
 
-  const size = fs.statSync(out).size
-  if (size > WHISPER_SIZE_LIMIT) {
-    throw new Error(
-      `Áudio com ${(size / 1024 / 1024).toFixed(1)}MB excede o limite de 25MB do Whisper e ` +
-        'não há ffmpeg neste ambiente para dividir. Use a CLI local para vídeos longos.',
-    )
-  }
+  // Confirmação após o download (contentLength pode não vir no metadata).
+  assertWithinWhisperLimit(fs.statSync(out).size)
   return out
 }
 
