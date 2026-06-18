@@ -111,6 +111,26 @@ O app web é Next.js, então a Vercel hospeda com configuração zero.
 - O backup em `output/` não funciona (filesystem read-only), mas isso é best-effort e
   **não** atrapalha o download — o ZIP é gerado normalmente.
 
+### Como obter e configurar o `YOUTUBE_COOKIE`
+
+> ⚠️ O cookie equivale à senha da sua conta Google. **Use uma conta descartável** (não a
+> principal) e configure **só** no painel da Vercel — nunca faça commit.
+
+1. Faça login no `https://www.youtube.com` no navegador, com a conta descartável.
+2. Abra o **DevTools** (F12) → aba **Network** (Rede).
+3. Recarregue a página e clique na primeira requisição para `youtube.com`.
+4. Em **Request Headers**, ache a linha **`cookie:`** e copie **todo** o valor
+   (algo como `SID=...; HSID=...; SAPISID=...; __Secure-1PSID=...; ...`).
+5. Na Vercel: **Settings → Environment Variables → Add New**
+   - Key: `YOUTUBE_COOKIE`
+   - Value: a string copiada
+   - Environments: marque **Production** (e Preview, se usar).
+6. **Redeploy** (variáveis novas só valem em um deploy novo): aba **Deployments → ⋯ →
+   Redeploy**, ou faça um push.
+
+O cookie pode expirar com o tempo (ou se você deslogar). Se os erros de bot voltarem,
+gere um novo. Alternativa mais durável (avançada): `YOUTUBE_VISITOR_DATA` + `YOUTUBE_PO_TOKEN`.
+
 ## Segurança — leia antes de compartilhar a pasta
 
 - **Cada pessoa usa a PRÓPRIA chave OpenAI.** Não compartilhe a sua.

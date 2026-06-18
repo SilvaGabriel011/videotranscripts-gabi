@@ -250,13 +250,12 @@ export default function Page() {
                   <StatusBadge item={it} />
                   <span className="row-title">{it.title || it.url}</span>
                   {it.topics && <span className="row-tag">capítulos</span>}
-                  {it.topicsError && (
-                    <span className="status-erro" title={it.topicsError}>
-                      · capítulos ✗
-                    </span>
-                  )}
                 </div>
                 {it.status === 'processando' && <div className="bar-indeterminate" />}
+                {it.status === 'erro' && it.error && <ErrorPanel raw={it.error} />}
+                {it.status === 'ok' && it.topicsError && (
+                  <ErrorPanel raw={it.topicsError} label="Capítulos não gerados" />
+                )}
               </div>
             ))}
 
@@ -306,7 +305,104 @@ function StatusBadge({ item }: { item: Item }) {
     )
   return (
     <span className="status-erro" title={item.error}>
-      ✗ {item.error}
+      ✗ falhou
     </span>
+  )
+}
+
+/**
+ * Traduz o erro técnico da API numa mensagem clara e acionável, preservando o texto cru
+ * em `detail` (mostrado num "ver detalhe"). A ordem importa: casos específicos primeiro.
+ */
+function friendlyError(raw?: string): { title: string; hint?: string; detail: string } {
+  const detail = (raw ?? '').trim()
+  const low = detail.toLowerCase()
+  if (!detail) return { title: 'Erro desconhecido.', detail: '' }
+
+  if (low.includes('openai_api_key') || low.includes('chave da openai') || low.includes('api key não')) {
+    return {
+      title: 'Chave da OpenAI ausente.',
+      hint: 'Crie um arquivo .env na raiz com OPENAI_API_KEY=sk-... (veja .env.example) e rode o app de novo.',
+      detail,
+    }
+  }
+  if (
+    low.includes('incorrect api key') ||
+    low.includes('invalid_api_key') ||
+    (low.includes('api key') && low.includes('invalid')) ||
+    low.includes('401')
+  ) {
+    return {
+      title: 'Chave da OpenAI inválida.',
+      hint: 'Confira o valor de OPENAI_API_KEY no .env (deve começar com sk-).',
+      detail,
+    }
+  }
+  if (
+    low.includes('insufficient_quota') ||
+    low.includes('quota') ||
+    low.includes('429') ||
+    low.includes('rate limit') ||
+    low.includes('billing') ||
+    low.includes('exceeded')
+  ) {
+    return {
+      title: 'Limite ou saldo da OpenAI excedido.',
+      hint: 'Verifique saldo, billing e limites de uso na plataforma da OpenAI.',
+      detail,
+    }
+  }
+  if (low.includes('url inválida')) {
+    return { title: 'URL inválida.', hint: 'Cole o link de um vídeo do YouTube.', detail }
+  }
+  if (low.includes('yt-dlp') || low.includes('ffmpeg')) {
+    return {
+      title: 'Falta yt-dlp/ffmpeg para processar o áudio.',
+      hint: 'Rode o setup (setup.sh / setup.ps1) ou instale yt-dlp e ffmpeg para transcrever vídeos sem legenda.',
+      detail,
+    }
+  }
+  if (
+    low.includes('no valid url to decipher') ||
+    low.includes('nenhum formato de áudio') ||
+    low.includes('failed to get player') ||
+    low.includes('youtubei.js')
+  ) {
+    return {
+      title: 'O YouTube bloqueou o acesso ao vídeo/áudio.',
+      hint: 'Comum em servidores (IP de data center). Rode localmente ou configure YOUTUBE_COOKIE.',
+      detail,
+    }
+  }
+  if (low.includes('legenda:') && low.includes('whisper:')) {
+    return {
+      title: 'Sem legenda e o Whisper falhou.',
+      hint: 'O vídeo não tem legenda e a transcrição por áudio não foi possível — veja o detalhe.',
+      detail,
+    }
+  }
+  if (low.includes('transcrição vazia') || low.includes('legenda vazia')) {
+    return { title: 'A transcrição veio vazia.', detail }
+  }
+  return { title: 'Falha ao processar este vídeo.', detail }
+}
+
+/** Painel de erro legível: mensagem clara + dica + detalhe técnico recolhível. */
+function ErrorPanel({ raw, label }: { raw: string; label?: string }) {
+  const { title, hint, detail } = friendlyError(raw)
+  return (
+    <div className="error-panel" role="alert">
+      <div className="error-title">
+        ⚠ {label ? `${label}: ` : ''}
+        {title}
+      </div>
+      {hint && <div className="error-hint">{hint}</div>}
+      {detail && detail !== title && (
+        <details className="error-detail">
+          <summary>Ver detalhe técnico</summary>
+          <code>{detail}</code>
+        </details>
+      )}
+    </div>
   )
 }

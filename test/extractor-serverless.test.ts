@@ -5,7 +5,11 @@ import {
   youtubeSessionOptions,
   transcriptToSegments,
   downloadAudioServerless,
+  pickCaptionTrack,
+  timedTextToSegments,
   type RawTranscriptSegment,
+  type CaptionTrackLite,
+  type Json3Event,
 } from '../lib/extractor'
 
 const MB = 1024 * 1024
@@ -79,6 +83,61 @@ describe('transcriptToSegments', () => {
   it('lança quando não sobra nenhum segmento', () => {
     expect(() => transcriptToSegments([])).toThrow(/Nenhuma legenda/)
     expect(() => transcriptToSegments([{ snippet: { text: 'header' } }])).toThrow(/Nenhuma legenda/)
+  })
+})
+
+describe('pickCaptionTrack', () => {
+  const tracks: CaptionTrackLite[] = [
+    { base_url: 'u-en-asr', language_code: 'en', kind: 'asr' },
+    { base_url: 'u-pt', language_code: 'pt-BR' },
+    { base_url: 'u-es', language_code: 'es' },
+  ]
+
+  it('retorna null quando não há faixas', () => {
+    expect(pickCaptionTrack([], 'pt')).toBeNull()
+  })
+
+  it('casa o idioma por prefixo (pt -> pt-BR)', () => {
+    expect(pickCaptionTrack(tracks, 'pt')?.base_url).toBe('u-pt')
+  })
+
+  it('casa o idioma exato quando existe', () => {
+    expect(pickCaptionTrack(tracks, 'es')?.base_url).toBe('u-es')
+  })
+
+  it('sem idioma, prefere legenda manual sobre a automática (asr)', () => {
+    expect(pickCaptionTrack(tracks)?.base_url).toBe('u-pt')
+  })
+
+  it('cai na primeira faixa quando só há automática e o idioma não casa', () => {
+    const only: CaptionTrackLite[] = [{ base_url: 'u-en-asr', language_code: 'en', kind: 'asr' }]
+    expect(pickCaptionTrack(only, 'fr')?.base_url).toBe('u-en-asr')
+  })
+})
+
+describe('timedTextToSegments', () => {
+  it('junta os segs, normaliza espaços e decodifica entidades', () => {
+    const events: Json3Event[] = [
+      { tStartMs: 0, dDurationMs: 1200, segs: [{ utf8: 'Olá' }, { utf8: ' &amp;' }, { utf8: ' mundo' }] },
+      { tStartMs: 1200, dDurationMs: 900, segs: [{ utf8: 'linha\n quebrada' }] },
+    ]
+    expect(timedTextToSegments(events)).toEqual([
+      { text: 'Olá & mundo', offset: 0, duration: 1200 },
+      { text: 'linha quebrada', offset: 1200, duration: 900 },
+    ])
+  })
+
+  it('ignora eventos sem segs (posicionamento) e textos vazios', () => {
+    const events: Json3Event[] = [
+      { tStartMs: 0, dDurationMs: 100 }, // sem segs
+      { tStartMs: 100, dDurationMs: 100, segs: [{ utf8: '\n' }] }, // só espaço
+      { tStartMs: 200, dDurationMs: 500, segs: [{ utf8: 'ok' }] },
+    ]
+    expect(timedTextToSegments(events)).toEqual([{ text: 'ok', offset: 200, duration: 500 }])
+  })
+
+  it('lança quando não há texto algum', () => {
+    expect(() => timedTextToSegments([{ tStartMs: 0, dDurationMs: 1 }])).toThrow(/timedtext/)
   })
 })
 
