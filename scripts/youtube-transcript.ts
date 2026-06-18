@@ -23,28 +23,45 @@ import {
 } from '../lib/transcript-utils'
 import { extractTranscript } from '../lib/extractor'
 import { segmentTopics } from './topic-segmenter'
+import {
+  buildCostReport,
+  totalCostUsd,
+  videoDurationMs,
+  formatUsd,
+  type CostReportInput,
+} from './cost'
 
 type ProcessResult =
-  | { url: string; status: 'ok'; file: string; source: string }
+  | { url: string; status: 'ok'; file: string; source: string; costUsd?: number | null }
   | { url: string; status: 'erro'; reason: string }
 
 // ---------------------------------------------------------------------------
 // Metadados / nome de arquivo
 // ---------------------------------------------------------------------------
 
+/** Diretório-base onde cada vídeo ganha sua própria subpasta. */
+const OUTPUT_BASE = path.join(process.cwd(), 'output')
+
 /**
- * Resolve um nome-base único (sem extensão) onde nem `.txt` nem `.srt` existam,
- * anexando " (2)", " (3)"... se preciso — assim os dois arquivos do mesmo vídeo
- * compartilham o mesmo nome.
+ * Cria (se preciso) uma subpasta dedicada ao vídeo dentro de `output/` e
+ * retorna o "stem" (caminho sem extensão) dos artefatos dentro dela.
+ *
+ * A unicidade é por PASTA: se `output/<título>/` já existir, usa
+ * `output/<título> (2)/`, `(3)`... Os arquivos dentro mantêm o nome do vídeo,
+ * então o set fica auto-descritivo mesmo se a pasta for movida/compartilhada.
  */
-function resolveOutputStem(dir: string, baseName: string): string {
+function resolveOutputStem(baseDir: string, baseName: string): string {
   const safeBase = baseName || 'transcript'
-  const free = (stem: string) =>
-    !fs.existsSync(path.join(dir, `${stem}.txt`)) && !fs.existsSync(path.join(dir, `${stem}.srt`))
-  if (free(safeBase)) return path.join(dir, safeBase)
-  let n = 2
-  while (!free(`${safeBase} (${n})`)) n++
-  return path.join(dir, `${safeBase} (${n})`)
+  const free = (folder: string) => !fs.existsSync(path.join(baseDir, folder))
+  let folderName = safeBase
+  if (!free(folderName)) {
+    let n = 2
+    while (!free(`${safeBase} (${n})`)) n++
+    folderName = `${safeBase} (${n})`
+  }
+  const dir = path.join(baseDir, folderName)
+  fs.mkdirSync(dir, { recursive: true })
+  return path.join(dir, safeBase)
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +99,7 @@ async function processOne(
   }
 
   const baseName = result.title ? sanitizeFilename(result.title) : ''
-  const stem = resolveOutputStem(process.cwd(), baseName || result.videoId)
+  const stem = resolveOutputStem(OUTPUT_BASE, baseName || result.videoId)
   const out = writeOutputs(stem, result.segments)
 
   const preview = buildPlainText(result.segments).slice(0, 200)
@@ -92,9 +109,14 @@ async function processOne(
   console.log(`     "${preview}${preview.length >= 200 ? '...' : ''}"`)
 
   let chaptersFile: string | undefined
+  let costFile: string | undefined
+  let costUsd: number | null | undefined
   if (topics) {
     try {
-      const chapters = await segmentTopics(result.segments, { lang, videoTitle: result.title })
+      const { chapters, usage } = await segmentTopics(result.segments, {
+        lang,
+        videoTitle: result.title,
+      })
       if (chapters.length > 0) {
         const chaptersPath = `${stem}.chapters.txt`
         fs.writeFileSync(chaptersPath, buildChaptersText(chapters) + '\n', 'utf-8')
@@ -103,15 +125,27 @@ async function processOne(
       } else {
         console.log('   ⚠ temas: nenhum capítulo gerado')
       }
+
+      // Relatório de custo desta URL (custo REAL via `usage` da OpenAI).
+      const costInput: CostReportInput = {
+        title: result.title,
+        url,
+        source: result.source,
+        durationMs: videoDurationMs(result.segments),
+        usage,
+      }
+      const costPath = `${stem}.cost.txt`
+      fs.writeFileSync(costPath, buildCostReport(costInput) + '\n', 'utf-8')
+      costFile = path.basename(costPath)
+      costUsd = totalCostUsd(costInput)
+      console.log(`   ✓ ${costFile} (custo: ${formatUsd(costUsd)})`)
     } catch (topicErr) {
       console.log(`   ⚠ temas: ${topicErr instanceof Error ? topicErr.message : String(topicErr)}`)
     }
   }
 
-  const names = chaptersFile
-    ? `${out.txt} + ${out.srt} + ${chaptersFile}`
-    : `${out.txt} + ${out.srt}`
-  return { url, status: 'ok', file: names, source: result.source }
+  const names = [out.txt, out.srt, chaptersFile, costFile].filter(Boolean).join(' + ')
+  return { url, status: 'ok', file: names, source: result.source, costUsd }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +221,15 @@ async function main(): Promise<void> {
   if (ok.length > 0) {
     console.log('\n✓ Transcritos:')
     for (const r of ok) console.log(`   ${r.file}  (${r.source})`)
+
+    const withCost = ok.filter((r) => r.costUsd !== undefined)
+    if (withCost.length > 0) {
+      const known = withCost.reduce((sum, r) => sum + (r.costUsd ?? 0), 0)
+      const hasUnknown = withCost.some((r) => r.costUsd === null)
+      console.log(
+        `\n💲 Custo total (IA): ${formatUsd(known)}${hasUnknown ? ' + parte desconhecida' : ''}`,
+      )
+    }
   }
   if (fail.length > 0) {
     console.log('\n✗ Falhas:')

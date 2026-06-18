@@ -7,9 +7,11 @@ import {
   sanitizeFilename,
   buildPlainText,
   buildTimestampedText,
+  buildAnchoredTranscript,
   buildSrt,
   formatChapterTimestamp,
   normalizeChapters,
+  resolveChaptersByQuote,
   buildChaptersText,
   type Segment,
 } from '../lib/transcript-utils'
@@ -275,6 +277,153 @@ describe('buildSrt', () => {
     expect(buildSrt(segs)).toBe(
       '1\n00:00:01,000 --> 00:00:01,001\na\n\n' + '2\n00:00:01,000 --> 00:00:03,000\nb',
     )
+  })
+})
+
+describe('buildAnchoredTranscript', () => {
+  it('retorna string vazia para lista vazia', () => {
+    expect(buildAnchoredTranscript([])).toBe('')
+  })
+
+  it('mantém um único anchor enquanto não passa de stepMs desde o anchor', () => {
+    const segs: Segment[] = [
+      { text: 'a', offset: 0, duration: 1000 },
+      { text: 'b', offset: 5000, duration: 1000 },
+      { text: 'c', offset: 11000, duration: 1000 },
+    ]
+    expect(buildAnchoredTranscript(segs, 12000)).toBe('[00:00] a b c')
+  })
+
+  it('abre novo anchor quando passa de stepMs desde o anchor atual', () => {
+    const segs: Segment[] = [
+      { text: 'a', offset: 0, duration: 1000 },
+      { text: 'b', offset: 5000, duration: 1000 },
+      { text: 'c', offset: 11000, duration: 1000 },
+      { text: 'd', offset: 13000, duration: 1000 },
+      { text: 'e', offset: 25000, duration: 1000 },
+    ]
+    // anchor=0 até 'c' (11s<12s); 'd' em 13s (≥12s) abre [00:13]; 'e' em 25s (≥12s desde 13s) abre [00:25]
+    expect(buildAnchoredTranscript(segs, 12000)).toBe('[00:00] a b c\n[00:13] d\n[00:25] e')
+  })
+
+  it('gera âncoras finas (~5/min) em fala contínua — bem mais que os parágrafos de 45s', () => {
+    // 30 segmentos de 2s = 60s; com stepMs=12000 → âncoras em 0,12,24,36,48s = 5
+    const segs: Segment[] = Array.from({ length: 30 }, (_, i) => ({
+      text: `s${i}`,
+      offset: i * 2000,
+      duration: 2000,
+    }))
+    const anchors = (buildAnchoredTranscript(segs, 12000).match(/\[\d/g) || []).length
+    expect(anchors).toBeGreaterThanOrEqual(5)
+  })
+})
+
+describe('resolveChaptersByQuote', () => {
+  // Segmentos espaçados em 15s para não disparar o near-dedup (≥10s) nos casos de matching.
+  const segs: Segment[] = [
+    { text: 'Olá pessoal bem vindo ao vídeo', offset: 0, duration: 4000 },
+    { text: 'hoje vamos falar sobre busca', offset: 15000, duration: 4000 },
+    { text: 'antes o patrocínio do canal', offset: 30000, duration: 4000 },
+    { text: 'voltando para a busca agora', offset: 45000, duration: 4000 },
+  ]
+
+  it('ancora cada quote ao offset do segmento real (1º forçado a 0)', () => {
+    const raw = [
+      { quote: 'Olá pessoal bem vindo', title: 'Abertura' },
+      { quote: 'antes o patrocínio do canal', title: 'Patrocínio' },
+    ]
+    expect(resolveChaptersByQuote(raw, segs)).toEqual([
+      { offsetMs: 0, title: 'Abertura' },
+      { offsetMs: 30000, title: 'Patrocínio' },
+    ])
+  })
+
+  it('casa ignorando caixa e pontuação', () => {
+    const raw = [
+      { quote: 'olá pessoal', title: 'A' },
+      { quote: 'HOJE, VAMOS!! falar', title: 'B' },
+    ]
+    expect(resolveChaptersByQuote(raw, segs)).toEqual([
+      { offsetMs: 0, title: 'A' },
+      { offsetMs: 15000, title: 'B' },
+    ])
+  })
+
+  it('frase repetida: casa a ocorrência POSTERIOR (cursor pra frente)', () => {
+    const raw = [
+      { quote: 'hoje vamos falar sobre busca', title: 'Busca 1' },
+      { quote: 'busca agora', title: 'Busca 2' },
+    ]
+    expect(resolveChaptersByQuote(raw, segs)).toEqual([
+      { offsetMs: 0, title: 'Busca 1' },
+      { offsetMs: 45000, title: 'Busca 2' },
+    ])
+  })
+
+  it('pula capítulo cujo quote não existe no transcript', () => {
+    const raw = [
+      { quote: 'olá pessoal', title: 'A' },
+      { quote: 'isso nao existe no texto xyz', title: 'Fantasma' },
+      { quote: 'voltando para a busca', title: 'C' },
+    ]
+    expect(resolveChaptersByQuote(raw, segs)).toEqual([
+      { offsetMs: 0, title: 'A' },
+      { offsetMs: 45000, title: 'C' },
+    ])
+  })
+
+  it('cai pra prefixo (3 palavras) quando o quote tem cauda divergente', () => {
+    const raw = [
+      { quote: 'olá pessoal', title: 'A' },
+      { quote: 'antes o patrocínio blá blá', title: 'Patrocínio' },
+    ]
+    expect(resolveChaptersByQuote(raw, segs)).toEqual([
+      { offsetMs: 0, title: 'A' },
+      { offsetMs: 30000, title: 'Patrocínio' },
+    ])
+  })
+
+  it('listas vazias → []', () => {
+    expect(resolveChaptersByQuote([], segs)).toEqual([])
+    expect(resolveChaptersByQuote([{ quote: 'olá', title: 'X' }], [])).toEqual([])
+  })
+
+  // near-dedup: capítulos a menos de minGapMs viram um só (mantém o primeiro do cluster)
+  const closeSegs: Segment[] = [
+    { text: 'abertura do vídeo aqui', offset: 0, duration: 2000 },
+    { text: 'primeiro ponto importante agora', offset: 3000, duration: 2000 },
+    { text: 'mais um ponto colado', offset: 6000, duration: 2000 },
+    { text: 'tema bem mais adiante enfim', offset: 40000, duration: 2000 },
+  ]
+  const closeRaw = [
+    { quote: 'abertura do vídeo', title: 'A' },
+    { quote: 'primeiro ponto importante', title: 'B' }, // 3s após A → funde (default 10s)
+    { quote: 'mais um ponto colado', title: 'C' }, // 6s após A → funde também (cluster)
+    { quote: 'tema bem mais adiante', title: 'D' }, // 40s → mantém
+  ]
+
+  it('funde capítulos a menos de minGapMs, mantendo o primeiro do cluster (default 10s)', () => {
+    expect(resolveChaptersByQuote(closeRaw, closeSegs)).toEqual([
+      { offsetMs: 0, title: 'A' },
+      { offsetMs: 40000, title: 'D' },
+    ])
+  })
+
+  it('respeita minGapMs customizado (0 = não funde nada)', () => {
+    expect(resolveChaptersByQuote(closeRaw, closeSegs, 0)).toEqual([
+      { offsetMs: 0, title: 'A' },
+      { offsetMs: 3000, title: 'B' },
+      { offsetMs: 6000, title: 'C' },
+      { offsetMs: 40000, title: 'D' },
+    ])
+  })
+
+  it('com minGapMs=5000, funde só o que está a <5s (mantém o de 6s)', () => {
+    expect(resolveChaptersByQuote(closeRaw, closeSegs, 5000)).toEqual([
+      { offsetMs: 0, title: 'A' }, // B (3s) fundido
+      { offsetMs: 6000, title: 'C' }, // 6s ≥ 5s → mantém
+      { offsetMs: 40000, title: 'D' },
+    ])
   })
 })
 

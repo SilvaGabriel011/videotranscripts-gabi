@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Extrai transcripts de vídeos do YouTube (legendas + fallback Whisper) para .txt",
+  "engines": {
+    "node": ">=20.12"
+  },
   "scripts": {
     "transcript:youtube": "tsx scripts/youtube-transcript.ts",
     "test": "vitest run",

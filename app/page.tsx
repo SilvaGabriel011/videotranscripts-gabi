@@ -5,8 +5,13 @@ import JSZip from 'jszip'
 
 type Phase = 'idle' | 'confirming' | 'running' | 'done'
 type ItemStatus = 'fila' | 'processando' | 'ok' | 'erro'
+
+/** Um campo de entrada: a URL e se gera capítulos por tópico (IA) para ela. */
+type UrlField = { url: string; topics: boolean }
+
 type Item = {
   url: string
+  topics: boolean
   status: ItemStatus
   title?: string
   source?: string
@@ -14,11 +19,17 @@ type Item = {
   base?: string
   txt?: string
   srt?: string
+  chapters?: string
+  cost?: string
+  costUsd?: number | null
+  topicsError?: string
+  savedTo?: string
+  backupError?: string
 }
 
-/** Remove espaços e descarta campos vazios, preservando a ordem. */
-function cleanUrls(inputs: string[]): string[] {
-  return inputs.map((u) => u.trim()).filter((u) => u.length > 0)
+/** Formata US$ (6 casas, valores pequenos); 'desconhecido' quando o preço é null. */
+function fmtUsd(value: number | null): string {
+  return value === null ? 'desconhecido' : `US$ ${value.toFixed(6)}`
 }
 
 /** Garante nomes-base únicos no ZIP, anexando " (2)", " (3)"... em colisões. */
@@ -35,26 +46,44 @@ function uniqueBase(base: string, used: Set<string>): string {
 }
 
 export default function Page() {
-  const [urlInputs, setUrlInputs] = useState<string[]>([''])
+  const [fields, setFields] = useState<UrlField[]>([{ url: '', topics: false }])
   const [phase, setPhase] = useState<Phase>('idle')
   const [items, setItems] = useState<Item[]>([])
 
-  const urls = useMemo(() => cleanUrls(urlInputs), [urlInputs])
-  const doneCount = items.filter((i) => i.status === 'ok' || i.status === 'erro').length
+  const active = useMemo(() => fields.filter((f) => f.url.trim().length > 0), [fields])
+  const topicsCount = active.filter((f) => f.topics).length
 
-  function setInput(index: number, value: string) {
-    setUrlInputs((prev) => prev.map((u, i) => (i === index ? value : u)))
+  const total = items.length
+  const doneCount = items.filter((i) => i.status === 'ok' || i.status === 'erro').length
+  const pct = total > 0 ? Math.round((doneCount / total) * 100) : 0
+
+  // Custo total do batch (só itens que rodaram capítulos têm costUsd definido).
+  const costItems = items.filter((i) => i.status === 'ok' && i.costUsd !== undefined)
+  const knownCost = costItems.reduce((s, i) => s + (typeof i.costUsd === 'number' ? i.costUsd : 0), 0)
+  const hasUnknownCost = costItems.some((i) => i.costUsd === null)
+
+  // Backup no servidor (pasta do projeto).
+  const savedDir = items.find((i) => i.status === 'ok' && i.savedTo)?.savedTo
+  const backupFailed = items.some((i) => i.status === 'ok' && i.backupError)
+
+  function setUrl(index: number, value: string) {
+    setFields((prev) => prev.map((f, i) => (i === index ? { ...f, url: value } : f)))
   }
-  function addInput() {
-    setUrlInputs((prev) => [...prev, ''])
+  function toggleTopics(index: number) {
+    setFields((prev) => prev.map((f, i) => (i === index ? { ...f, topics: !f.topics } : f)))
   }
-  function removeInput(index: number) {
+  function addField() {
+    setFields((prev) => [...prev, { url: '', topics: false }])
+  }
+  function removeField(index: number) {
     // Mantém sempre ao menos um campo (vazio) na tela.
-    setUrlInputs((prev) => (prev.length === 1 ? [''] : prev.filter((_, i) => i !== index)))
+    setFields((prev) =>
+      prev.length === 1 ? [{ url: '', topics: false }] : prev.filter((_, i) => i !== index),
+    )
   }
 
   function openConfirm() {
-    setItems(urls.map((url) => ({ url, status: 'fila' })))
+    setItems(active.map((f) => ({ url: f.url.trim(), topics: f.topics, status: 'fila' })))
     setPhase('confirming')
   }
 
@@ -74,7 +103,7 @@ export default function Page() {
         const res = await fetch('/api/transcript', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ url: collected[i].url }),
+          body: JSON.stringify({ url: collected[i].url, topics: collected[i].topics }),
         })
         const json = await res.json()
         if (json.ok) {
@@ -86,6 +115,12 @@ export default function Page() {
             base: json.base,
             txt: json.txt,
             srt: json.srt,
+            chapters: json.chapters,
+            cost: json.cost,
+            costUsd: json.costUsd,
+            topicsError: json.topicsError,
+            savedTo: json.savedTo,
+            backupError: json.backupError,
           }
         } else {
           collected[i] = { ...collected[i], status: 'erro', error: json.error ?? 'erro desconhecido' }
@@ -113,6 +148,8 @@ export default function Page() {
       const base = uniqueBase(it.base || 'transcript', used)
       zip.file(`${base}.txt`, (it.txt ?? '') + '\n')
       zip.file(`${base}.srt`, (it.srt ?? '') + '\n')
+      if (it.chapters) zip.file(`${base}.chapters.txt`, it.chapters + '\n')
+      if (it.cost) zip.file(`${base}.cost.txt`, it.cost + '\n')
     }
     const blob = await zip.generateAsync({ type: 'blob' })
     const a = document.createElement('a')
@@ -127,23 +164,33 @@ export default function Page() {
   return (
     <main className="container">
       <h1>YouTube Transcript</h1>
-      <p className="muted">Adicione uma ou mais URLs do YouTube. Gera .txt (texto) + .srt (legenda) por vídeo.</p>
+      <p className="muted">
+        Adicione uma ou mais URLs. Gera .txt (texto) + .srt (legenda) por vídeo. Marque{' '}
+        <strong>capítulos</strong> num vídeo para também gerar capítulos por tópico (IA, com custo).
+      </p>
 
       <div className="url-list">
-        {urlInputs.map((value, idx) => (
+        {fields.map((f, idx) => (
           <div className="url-row" key={idx}>
             <input
               type="url"
               className="url-input"
-              value={value}
-              onChange={(e) => setInput(idx, e.target.value)}
+              value={f.url}
+              onChange={(e) => setUrl(idx, e.target.value)}
               placeholder="https://www.youtube.com/watch?v=..."
             />
+            <label
+              className="chip"
+              title="Divide o vídeo em capítulos por tema (estilo dos capítulos da descrição do YouTube), usando IA (gpt-4o-mini). Adiciona .chapters.txt + .cost.txt ao ZIP. Tem custo por vídeo."
+            >
+              <input type="checkbox" checked={f.topics} onChange={() => toggleTopics(idx)} />
+              <span>capítulos</span>
+            </label>
             <button
               type="button"
               className="icon-btn"
-              onClick={() => removeInput(idx)}
-              disabled={urlInputs.length === 1 && value.trim() === ''}
+              onClick={() => removeField(idx)}
+              disabled={fields.length === 1 && f.url.trim() === ''}
               aria-label="Remover esta URL"
               title="Remover"
             >
@@ -151,14 +198,14 @@ export default function Page() {
             </button>
           </div>
         ))}
-        <button type="button" className="secondary add-btn" onClick={addInput}>
+        <button type="button" className="secondary add-btn" onClick={addField}>
           + Adicionar URL
         </button>
       </div>
 
       <div>
-        <button onClick={openConfirm} disabled={urls.length === 0}>
-          Baixar transcripts{urls.length > 0 ? ` (${urls.length})` : ''}
+        <button onClick={openConfirm} disabled={active.length === 0}>
+          Baixar transcripts{active.length > 0 ? ` (${active.length})` : ''}
         </button>
       </div>
 
@@ -167,9 +214,15 @@ export default function Page() {
           <div className="modal">
             <h2>Confirmar execução</h2>
             <p>
-              Vou processar <strong>{items.length}</strong> vídeo(s) em fila. As legendas saem na
+              Vou processar <strong>{active.length}</strong> vídeo(s) em fila. As legendas saem na
               hora; vídeos sem legenda tentam Whisper (local).
             </p>
+            {topicsCount > 0 && (
+              <p className="muted">
+                <strong>{topicsCount}</strong> com capítulos por tópico: cada um faz uma chamada paga
+                ao gpt-4o-mini.
+              </p>
+            )}
             <div className="actions">
               <button className="secondary" onClick={cancel}>
                 Cancelar
@@ -184,21 +237,50 @@ export default function Page() {
         <div className="overlay">
           <div className="modal">
             <h2>
-              {phase === 'running' ? 'Processando' : 'Concluído'} ({doneCount}/{items.length})
+              {phase === 'running' ? 'Processando' : 'Concluído'} ({doneCount}/{total})
             </h2>
+
+            <div className="progress" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+              <div className="progress-fill" style={{ width: `${pct}%` }} />
+            </div>
+
             {items.map((it, idx) => (
               <div className="row" key={idx}>
-                <StatusBadge item={it} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {it.title || it.url}
-                </span>
+                <div className="row-main">
+                  <StatusBadge item={it} />
+                  <span className="row-title">{it.title || it.url}</span>
+                  {it.topics && <span className="row-tag">capítulos</span>}
+                  {it.topicsError && (
+                    <span className="status-erro" title={it.topicsError}>
+                      · capítulos ✗
+                    </span>
+                  )}
+                </div>
+                {it.status === 'processando' && <div className="bar-indeterminate" />}
               </div>
             ))}
+
             {phase === 'done' && (
               <>
+                {costItems.length > 0 && (
+                  <p className="muted">
+                    💲 Custo total (IA): {fmtUsd(knownCost)}
+                    {hasUnknownCost ? ' + parte desconhecida' : ''}
+                  </p>
+                )}
                 <p className="muted">
                   O ZIP com os sucessos foi baixado automaticamente. Falhas não entram no ZIP.
                 </p>
+                {savedDir && (
+                  <p className="muted">
+                    📁 Backup salvo na pasta <strong>{savedDir}/</strong> do projeto.
+                  </p>
+                )}
+                {backupFailed && (
+                  <p className="status-erro">
+                    ⚠ O backup no servidor falhou em algum vídeo (o download não foi afetado).
+                  </p>
+                )}
                 <div className="actions">
                   <button className="secondary" onClick={cancel}>
                     Fechar
@@ -217,7 +299,11 @@ function StatusBadge({ item }: { item: Item }) {
   if (item.status === 'fila') return <span className="status-fila">• na fila</span>
   if (item.status === 'processando') return <span className="status-proc">⟳ processando…</span>
   if (item.status === 'ok')
-    return <span className="status-ok" title={item.source}>✓ {item.source}</span>
+    return (
+      <span className="status-ok" title={item.source}>
+        ✓ {item.source}
+      </span>
+    )
   return (
     <span className="status-erro" title={item.error}>
       ✗ {item.error}

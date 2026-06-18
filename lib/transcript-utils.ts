@@ -171,6 +171,34 @@ export function buildTimestampedText(
     .join('\n')
 }
 
+/**
+ * Transcript com âncoras de tempo FINAS — um `[MM:SS]` a cada ~`stepMs` (≈5/min com
+ * o padrão de 12s), ancorado no offset do primeiro segmento de cada bloco.
+ *
+ * Diferente de `buildTimestampedText` (que agrupa por silêncio/seção, ~45s), aqui o
+ * objetivo é dar ao modelo de capítulos âncoras densas e regulares, para ele escolher
+ * o início de cada tema com precisão de tempo — sem depender de detectar pausas.
+ */
+export function buildAnchoredTranscript(segments: Segment[], stepMs = 12000): string {
+  if (segments.length === 0) return ''
+
+  const lines: string[] = []
+  let anchorOffset = segments[0].offset
+  let current: string[] = []
+
+  for (const seg of segments) {
+    if (current.length > 0 && seg.offset - anchorOffset >= stepMs) {
+      lines.push(`${formatTimestamp(anchorOffset)} ${normalizeSpaces(current.join(' '))}`)
+      current = []
+      anchorOffset = seg.offset
+    }
+    current.push(seg.text)
+  }
+  lines.push(`${formatTimestamp(anchorOffset)} ${normalizeSpaces(current.join(' '))}`)
+
+  return lines.join('\n')
+}
+
 // ---------------------------------------------------------------------------
 // Capítulos por tema (flag --topics)
 // ---------------------------------------------------------------------------
@@ -248,6 +276,94 @@ export function normalizeChapters(
   if (deduped.length > 0) deduped[0] = { ...deduped[0], offsetMs: 0 }
 
   return deduped
+}
+
+/** Quebra um texto em palavras normalizadas (minúsculas, sem pontuação, mantém acentos). */
+function normWords(s: string): string[] {
+  return s
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+}
+
+/**
+ * Ancora capítulos pelo CONTEÚDO em vez de um tempo chutado pelo modelo:
+ * o modelo devolve `{ quote, title }` (as primeiras palavras verbatim do trecho),
+ * e aqui localizamos esse `quote` na sequência de palavras dos segmentos
+ * cronometrados — o tempo sai do dado (precisão de segmento), não da aritmética da IA.
+ *
+ *  - Busca com cursor pra frente (respeita ordem e desambigua frases repetidas).
+ *  - Tolera paráfrase leve tentando o quote inteiro (≤8 palavras) e depois prefixos de 5 e 3.
+ *  - Quote não encontrado → capítulo descartado. 1º capítulo forçado a 0 (requisito YouTube).
+ */
+export function resolveChaptersByQuote(
+  raw: { quote: string; title: string }[],
+  segments: Segment[],
+  minGapMs = 10000,
+): Topic[] {
+  if (segments.length === 0) return []
+
+  const words: { w: string; offset: number }[] = []
+  for (const seg of segments) {
+    for (const w of normWords(seg.text)) words.push({ w, offset: seg.offset })
+  }
+  const hay = words.map((x) => x.w)
+
+  const indexOfSeq = (seq: string[], from: number): number => {
+    if (seq.length === 0) return -1
+    for (let i = from; i + seq.length <= hay.length; i++) {
+      let ok = true
+      for (let k = 0; k < seq.length; k++) {
+        if (hay[i + k] !== seq[k]) {
+          ok = false
+          break
+        }
+      }
+      if (ok) return i
+    }
+    return -1
+  }
+
+  const topics: Topic[] = []
+  let cursor = 0
+  for (const c of raw) {
+    const title = (c?.title ?? '').trim()
+    const needle = normWords(c?.quote ?? '')
+    if (!title || needle.length === 0) continue
+
+    // tenta o quote inteiro (≤8) e, se falhar, prefixos cada vez menores
+    const lens = [...new Set([Math.min(needle.length, 8), 5, 3])].filter((n) => n <= needle.length)
+    let foundAt = -1
+    for (const len of lens) {
+      foundAt = indexOfSeq(needle.slice(0, len), cursor)
+      if (foundAt >= 0) break
+    }
+    if (foundAt < 0) continue
+
+    topics.push({ offsetMs: words[foundAt].offset, title })
+    cursor = foundAt + 1
+  }
+
+  // dedup de offsets iguais (offsets são não-decrescentes pelo cursor)
+  const deduped: Topic[] = []
+  for (const t of topics) {
+    if (deduped.length > 0 && deduped[deduped.length - 1].offsetMs === t.offsetMs) continue
+    deduped.push(t)
+  }
+  // 1º capítulo começa em 0 (requisito do YouTube; a distância é medida a partir daqui)
+  if (deduped.length > 0) deduped[0] = { ...deduped[0], offsetMs: 0 }
+
+  // near-dedup: capítulos a menos de `minGapMs` do anterior MANTIDO são fundidos
+  // (mantém o primeiro do cluster). Default 10s = mínimo de capítulo do YouTube.
+  const spaced: Topic[] = []
+  for (const t of deduped) {
+    if (spaced.length === 0 || t.offsetMs - spaced[spaced.length - 1].offsetMs >= minGapMs) {
+      spaced.push(t)
+    }
+  }
+
+  return spaced
 }
 
 /** Monta o arquivo de capítulos: uma linha `M:SS Título` por tema. */
