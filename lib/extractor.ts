@@ -4,8 +4,13 @@ import * as os from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { Innertube, type YT } from 'youtubei.js'
+import { Innertube, Log, type YT } from 'youtubei.js'
 import { extractVideoId, decodeHtmlEntities, type Segment } from './transcript-utils'
+
+// Silencia os avisos não-fatais do parser da youtubei.js (nós novos do YouTube que a versão
+// instalada ainda não mapeia — "Type mismatch", "not found!", etc.). São ruído de console e
+// não quebram nada: erros reais continuam sendo lançados e tratados pelo try/catch abaixo.
+Log.setLevel(Log.Level.NONE)
 
 /** Info de vídeo da youtubei.js (namespace YT). */
 type VideoInfo = YT.VideoInfo
