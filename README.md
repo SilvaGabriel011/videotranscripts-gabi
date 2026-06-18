@@ -73,6 +73,44 @@ A saída da CLI vai para `output/<título-do-vídeo>/` (uma pasta por vídeo).
 
 ---
 
+## Deploy na Vercel
+
+O app web é Next.js, então a Vercel hospeda com configuração zero.
+
+1. Suba o repositório no GitHub e, em **vercel.com → Add New → Project**, importe-o.
+   A Vercel detecta o Next.js automaticamente (não precisa configurar build).
+2. Em **Settings → Environment Variables**, adicione (para os recursos de IA):
+   - `OPENAI_API_KEY` — sua chave (necessária para `--topics` e para o fallback Whisper).
+   - opcional: `OPENAI_TRANSCRIBE_MODEL`, `OPENAI_TOPICS_MODEL`.
+   - opcional: `YOUTUBE_COOKIE` — veja abaixo.
+3. Deploy.
+
+**O que funciona no serverless:**
+- Extração de legendas (a maioria dos vídeos) — via `youtubei.js` (API InnerTube), sem
+  dependências externas.
+- Capítulos por tema + custo (`--topics`) — só usa a API da OpenAI.
+- Fallback Whisper (vídeos **sem** legenda) — baixa o áudio via `youtubei.js` (JS puro),
+  sem precisar de `yt-dlp`/`ffmpeg`. **Localmente**, se você tiver `yt-dlp` + `ffmpeg`
+  instalados, o app usa esse caminho (suporta vídeos longos com chunking).
+
+**Limitações na Vercel:**
+- **Bloqueio de IP (afeta TUDO):** o YouTube costuma barrar IPs de data center ("confirme
+  que você não é um robô"), atingindo tanto a legenda quanto o áudio do Whisper. A boa
+  notícia: como tudo passa pela `youtubei.js`, o `YOUTUBE_COOKIE` autentica **os dois** e
+  resolve a maioria dos casos. Sem cookie, espere que parte dos vídeos falhe em produção.
+- **Cookie (`YOUTUBE_COOKIE`):** a STRING do header Cookie do `youtube.com` (ex.:
+  `SID=...; HSID=...; SAPISID=...`), pega no DevTools (Network → requisição p/ youtube.com →
+  Request Headers → Cookie). ⚠️ Dá acesso à conta Google — trate como senha, use conta
+  descartável e configure **só** no painel de variáveis da Vercel (nunca faça commit).
+  Opcionais avançados anti-bot: `YOUTUBE_VISITOR_DATA` e `YOUTUBE_PO_TOKEN`.
+- **Vídeos longos:** sem `ffmpeg` para dividir o áudio, vídeos cujo áudio passe de ~25MB
+  (≈ 30–45 min) excedem o limite do Whisper e retornam erro. Para esses, use a CLI local.
+- **Timeout:** a transcrição pode demorar. A rota usa `maxDuration = 60` (funciona em
+  todos os planos; valores acima do limite do plano **fazem o deploy falhar**). Extração
+  de legenda é rápida. No **Pro/Enterprise** você pode subir para até 300 para vídeos longos.
+- O backup em `output/` não funciona (filesystem read-only), mas isso é best-effort e
+  **não** atrapalha o download — o ZIP é gerado normalmente.
+
 ## Segurança — leia antes de compartilhar a pasta
 
 - **Cada pessoa usa a PRÓPRIA chave OpenAI.** Não compartilhe a sua.

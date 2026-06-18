@@ -7,6 +7,10 @@ import { buildCostReport, totalCostUsd, videoDurationMs, type CostReportInput } 
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+// Teto de execução da função. 60s funciona em TODOS os planos da Vercel (inclusive Hobby);
+// definir acima do limite do plano FAZ O DEPLOY FALHAR. A extração de legenda (caso comum)
+// é rápida; no Pro/Enterprise dá pra subir até 300 para vídeos longos via Whisper.
+export const maxDuration = 60
 
 /** Pasta de backup no projeto (gitignored). */
 const OUTPUT_DIR = 'output'

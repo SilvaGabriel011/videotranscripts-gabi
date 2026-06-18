@@ -3,9 +3,9 @@
  *
  * Recebe uma ou mais URLs do YouTube e gera um .txt por vídeo, nomeado pelo
  * título do vídeo. Dois modos por vídeo:
- *   1. Legendas do YouTube (sem API key) via `youtube-transcript`
- *   2. Fallback: baixa o áudio com yt-dlp e transcreve via OpenAI Whisper
- *      (requer OPENAI_API_KEY + yt-dlp + ffmpeg instalados)
+ *   1. Legendas do YouTube (sem API key) via `youtubei.js` (API InnerTube)
+ *   2. Fallback: baixa o áudio e transcreve via OpenAI Whisper. Local usa yt-dlp +
+ *      ffmpeg (suporta vídeos longos); sem eles, baixa via youtubei.js (requer OPENAI_API_KEY)
  *
  * Uso:
  *   npx tsx scripts/youtube-transcript.ts "https://youtu.be/ID1" "https://youtu.be/ID2"
