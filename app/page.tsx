@@ -362,14 +362,16 @@ function friendlyError(raw?: string): { title: string; hint?: string; detail: st
       detail,
     }
   }
-  if (
-    low.includes('no valid url to decipher') ||
-    low.includes('nenhum formato de áudio') ||
-    low.includes('failed to get player') ||
-    low.includes('youtubei.js')
-  ) {
+  if (low.includes('no valid url to decipher') || low.includes('nenhum formato de áudio')) {
     return {
-      title: 'O YouTube bloqueou o acesso ao vídeo/áudio.',
+      title: 'Não consegui baixar o áudio para o Whisper.',
+      hint: 'Instale yt-dlp + ffmpeg (o app os usa automaticamente — é o jeito mais confiável, sobretudo local) ou configure YOUTUBE_COOKIE.',
+      detail,
+    }
+  }
+  if (low.includes('failed to get player') || low.includes('youtubei.js')) {
+    return {
+      title: 'O YouTube bloqueou o acesso ao vídeo.',
       hint: 'Comum em servidores (IP de data center). Rode localmente ou configure YOUTUBE_COOKIE.',
       detail,
     }
