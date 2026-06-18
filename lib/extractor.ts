@@ -112,8 +112,93 @@ export function transcriptToSegments(rawSegments: ReadonlyArray<RawTranscriptSeg
   return out
 }
 
-/** Busca a transcrição do vídeo via InnerTube, escolhendo o idioma quando disponível. */
+/** Forma mínima de uma faixa de legenda do player (caption_tracks). */
+export type CaptionTrackLite = {
+  base_url: string
+  language_code?: string
+  kind?: string
+}
+
+/**
+ * Escolhe a faixa de legenda: idioma pedido (igual e depois prefixo, ex.: 'pt' casa 'pt-BR')
+ * e prefere legenda MANUAL sobre a automática (`kind === 'asr'`). Sem match, usa a primeira.
+ * Exportada p/ teste.
+ */
+export function pickCaptionTrack<T extends CaptionTrackLite>(
+  tracks: ReadonlyArray<T>,
+  lang?: string,
+): T | null {
+  if (!tracks || tracks.length === 0) return null
+  if (lang) {
+    const exact = tracks.find((t) => t.language_code === lang)
+    if (exact) return exact
+    const prefix = tracks.find((t) => t.language_code?.startsWith(lang))
+    if (prefix) return prefix
+  }
+  const manual = tracks.find((t) => t.kind !== 'asr')
+  return manual ?? tracks[0]
+}
+
+/** Um evento do formato `json3` do timedtext do YouTube. */
+export type Json3Event = {
+  tStartMs?: number
+  dDurationMs?: number
+  segs?: Array<{ utf8?: string }>
+}
+
+/**
+ * Converte os eventos `json3` do timedtext em `Segment[]`: junta os `segs` de cada evento,
+ * normaliza espaços e pula eventos sem texto (posicionamento). Lança se não sobrar nada.
+ * Exportada p/ teste.
+ */
+export function timedTextToSegments(events: ReadonlyArray<Json3Event>): Segment[] {
+  const out: Segment[] = []
+  for (const ev of events) {
+    if (!ev?.segs) continue
+    const text = decodeHtmlEntities(
+      ev.segs
+        .map((s) => s.utf8 ?? '')
+        .join('')
+        .replace(/\s+/g, ' ')
+        .trim(),
+    )
+    if (!text) continue
+    out.push({
+      text,
+      offset: Math.round(Number(ev.tStartMs ?? 0)),
+      duration: Math.max(0, Math.round(Number(ev.dDurationMs ?? 0))),
+    })
+  }
+  if (out.length === 0) throw new Error('Legenda vazia (timedtext)')
+  return out
+}
+
+/** Baixa e parseia a legenda de uma faixa via timedtext `json3`. */
+async function fetchTimedText(track: CaptionTrackLite): Promise<Segment[]> {
+  const sep = track.base_url.includes('?') ? '&' : '?'
+  const res = await fetch(`${track.base_url}${sep}fmt=json3`)
+  if (!res.ok) throw new Error(`timedtext HTTP ${res.status}`)
+  const data = (await res.json()) as { events?: Json3Event[] }
+  return timedTextToSegments(data.events ?? [])
+}
+
+/**
+ * Busca a legenda do vídeo. Tenta primeiro as `caption_tracks` do player (timedtext json3) —
+ * mais confiável que o endpoint `get_transcript`, que costuma retornar 400 — e cai para o
+ * `get_transcript` se não houver faixa ou o timedtext falhar.
+ */
 async function fetchYoutubeCaptions(info: VideoInfo, lang?: string): Promise<Segment[]> {
+  // 1) Faixas de legenda do player (timedtext).
+  const track = pickCaptionTrack(info.captions?.caption_tracks ?? [], lang)
+  if (track?.base_url) {
+    try {
+      return await fetchTimedText(track)
+    } catch {
+      // timedtext falhou — tenta o get_transcript abaixo
+    }
+  }
+
+  // 2) Fallback: endpoint get_transcript.
   let tInfo = await info.getTranscript()
   if (lang) {
     try {
@@ -148,12 +233,17 @@ export async function downloadAudioServerless(
   videoId: string,
   tmpDir: string,
 ): Promise<string> {
-  // chooseFormat LANÇA quando não acha formato compatível.
+  // chooseFormat LANÇA quando não acha formato compatível (inclusive quando o YouTube
+  // devolve a resposta sem `streaming_data`, típico de bloqueio anti-bot).
   let format: ReturnType<VideoInfo['chooseFormat']>
   try {
     format = info.chooseFormat({ type: 'audio', quality: 'bestefficiency' })
   } catch {
-    throw new Error('Nenhum formato de áudio disponível para este vídeo')
+    throw new Error(
+      'Nenhum formato de áudio disponível (o YouTube não retornou os streams). Costuma ser ' +
+        'bloqueio anti-bot em IP de data center — defina YOUTUBE_COOKIE (ou YOUTUBE_PO_TOKEN ' +
+        '+ YOUTUBE_VISITOR_DATA) para autenticar.',
+    )
   }
 
   // Falha rápida: se o tamanho já vem no metadata e passa do limite, nem baixa.
